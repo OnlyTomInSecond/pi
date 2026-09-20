@@ -185,6 +185,15 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		return ids;
 	}
 
+	private rangeHasKittyImages(lines: readonly string[], from: number, to: number): boolean {
+		const start = Math.max(0, from);
+		const end = Math.min(to, lines.length - 1);
+		for (let i = start; i <= end; i++) {
+			if (extractKittyImageIds(lines[i] ?? "").length > 0) return true;
+		}
+		return false;
+	}
+
 	private deleteKittyImages(ids: Iterable<number>): string {
 		let buffer = "";
 		for (const id of ids) {
@@ -268,10 +277,8 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			newLines = this.compositeOverlays(newLines, width, height);
 		}
 
-		// Extract cursor position before applying line resets (marker must be found first)
+		// Extract cursor position before formatting line resets (marker must be found first)
 		const cursorPos = this.extractCursorPosition(newLines, height);
-
-		newLines = this.applyLineResets(newLines);
 
 		// Helper to clear scrollback and viewport and render all new lines
 		const fullRender = (clear: boolean): void => {
@@ -297,7 +304,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 					i += imageReservedRows - 1;
 					continue;
 				}
-				output.append(line);
+				output.append(this.formatOutputLine(line));
 			}
 			output.append("\x1b[?2026l"); // End synchronized output
 			output.flush();
@@ -381,10 +388,14 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			}
 			lastChanged = newLines.length - 1;
 		}
+		let trackKittyImages = this.previousKittyImageIds.size > 0;
 		if (firstChanged !== -1) {
-			const expandedRange = this.expandChangedRangeForKittyImages(firstChanged, lastChanged, newLines);
-			firstChanged = expandedRange.firstChanged;
-			lastChanged = expandedRange.lastChanged;
+			if (trackKittyImages || this.rangeHasKittyImages(newLines, firstChanged, lastChanged)) {
+				const expandedRange = this.expandChangedRangeForKittyImages(firstChanged, lastChanged, newLines);
+				firstChanged = expandedRange.firstChanged;
+				lastChanged = expandedRange.lastChanged;
+				trackKittyImages = true;
+			}
 		}
 		const appendStart = appendedLines && firstChanged === this.previousLines.length && firstChanged > 0;
 
@@ -439,7 +450,8 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			}
 			this.positionHardwareCursor(cursorPos, newLines.length);
 			this.previousLines = newLines;
-			this.previousKittyImageIds = this.collectKittyImageIds(newLines);
+			if (trackKittyImages) this.previousKittyImageIds = this.collectKittyImageIds(newLines);
+			else this.previousKittyImageIds.clear();
 			this.previousWidth = width;
 			this.previousHeight = height;
 			this.previousViewportTop = prevViewportTop;
@@ -514,13 +526,14 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			}
 
 			output.append("\x1b[2K"); // Clear current line
-			if (!isImage && visibleWidth(line) > width) {
+			const outputLine = this.formatOutputLine(line);
+			if (!isImage && visibleWidth(outputLine) > width) {
 				// Log all lines to crash file for debugging
 				const crashLogPath = path.join(this.logDirectory ?? os.tmpdir(), "pi-tui-crash.log");
 				const crashData = [
 					`Crash at ${new Date().toISOString()}`,
 					`Terminal width: ${width}`,
-					`Line ${i} visible width: ${visibleWidth(line)}`,
+					`Line ${i} visible width: ${visibleWidth(outputLine)}`,
 					"",
 					"=== All rendered lines ===",
 					...newLines.map((l, idx) => `[${idx}] (w=${visibleWidth(l)}) ${l}`),
@@ -533,7 +546,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 				this.stop();
 
 				const errorMsg = [
-					`Rendered line ${i} exceeds terminal width (${visibleWidth(line)} > ${width}).`,
+					`Rendered line ${i} exceeds terminal width (${visibleWidth(outputLine)} > ${width}).`,
 					"",
 					"This is likely caused by a custom TUI component not truncating its output.",
 					"Use visibleWidth() to measure and truncateToWidth() to truncate lines.",
@@ -542,7 +555,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 				].join("\n");
 				throw new Error(errorMsg);
 			}
-			output.append(line);
+			output.append(outputLine);
 		}
 
 		// Track where cursor ended up after rendering
@@ -610,7 +623,8 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		this.positionHardwareCursor(cursorPos, newLines.length);
 
 		this.previousLines = newLines;
-		this.previousKittyImageIds = this.collectKittyImageIds(newLines);
+		if (trackKittyImages) this.previousKittyImageIds = this.collectKittyImageIds(newLines);
+		else this.previousKittyImageIds.clear();
 		this.previousWidth = width;
 		this.previousHeight = height;
 	}

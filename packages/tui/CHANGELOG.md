@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Reduced regular-mode render cost for long transcripts by formatting only the lines that are actually written and skipping Kitty image scans when no images are present.
+
 ## [0.86.1] - 2026-09-20
 
 ## [0.86.0] - 2026-09-19
