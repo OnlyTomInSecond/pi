@@ -5371,6 +5371,7 @@ export class InteractiveMode {
 					this.ui.requestRender();
 				},
 				initialSelectedId,
+				this.ui.terminal.rows,
 			);
 			return { component: selector, focus: selector.getMessageList() };
 		});

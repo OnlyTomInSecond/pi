@@ -8,6 +8,18 @@ interface UserMessageItem {
 	timestamp?: string; // Optional timestamp if available
 }
 
+const MAX_VISIBLE_MESSAGES = 10;
+const MESSAGE_LINES = 3; // message line + metadata line + blank separator
+const SELECTOR_CHROME_LINES = 9; // spacers, header, description (may wrap), borders
+const FULLSCREEN_DOCK_RESERVED_LINES = 4; // transcript minimum plus status and footer
+
+/** Bound the visible list so a tall selector never pushes the input dock off screen. */
+function resolveMaxVisibleMessages(terminalHeight: number | undefined): number {
+	if (terminalHeight === undefined || !Number.isFinite(terminalHeight)) return MAX_VISIBLE_MESSAGES;
+	const listLines = terminalHeight - SELECTOR_CHROME_LINES - FULLSCREEN_DOCK_RESERVED_LINES;
+	return Math.max(1, Math.min(MAX_VISIBLE_MESSAGES, Math.floor(listLines / MESSAGE_LINES)));
+}
+
 /**
  * Custom user message list component with selection
  */
@@ -16,11 +28,12 @@ class UserMessageList implements Component {
 	private selectedIndex: number = 0;
 	public onSelect?: (entryId: string) => void;
 	public onCancel?: () => void;
-	private maxVisible: number = 10; // Max messages visible
+	private maxVisible: number;
 
-	constructor(messages: UserMessageItem[], initialSelectedId?: string) {
+	constructor(messages: UserMessageItem[], initialSelectedId?: string, maxVisible: number = MAX_VISIBLE_MESSAGES) {
 		// Store messages in chronological order (oldest to newest)
 		this.messages = messages;
+		this.maxVisible = maxVisible;
 		const initialIndex = initialSelectedId ? messages.findIndex((message) => message.id === initialSelectedId) : -1;
 		// Start with selected message if provided, else default to the most recent
 		this.selectedIndex = initialIndex >= 0 ? initialIndex : Math.max(0, messages.length - 1);
@@ -115,6 +128,7 @@ export class UserMessageSelectorComponent extends Container {
 		onSelect: (entryId: string) => void,
 		onCancel: () => void,
 		initialSelectedId?: string,
+		terminalHeight?: number,
 	) {
 		super();
 
@@ -133,7 +147,7 @@ export class UserMessageSelectorComponent extends Container {
 		this.addChild(new Spacer(1));
 
 		// Create message list
-		this.messageList = new UserMessageList(messages, initialSelectedId);
+		this.messageList = new UserMessageList(messages, initialSelectedId, resolveMaxVisibleMessages(terminalHeight));
 		this.messageList.onSelect = onSelect;
 		this.messageList.onCancel = onCancel;
 
