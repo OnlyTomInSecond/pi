@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { deleteKittyImage, isImageLine } from "./terminal-image.ts";
-import { type TUI, TuiBase, type TuiStopOptions } from "./tui.ts";
+import { type Component, type TUI, TuiBase, type TuiStopOptions } from "./tui.ts";
 import { visibleWidth } from "./utils.ts";
 
 const KITTY_SEQUENCE_PREFIX = "\x1b_G";
@@ -124,13 +124,84 @@ export interface TuiMainScreenRenderState {
 export class TuiMainScreen extends TuiBase implements TUI {
 	readonly mode = "regular" as const;
 	private previousLines: string[] = [];
+	private previousCommittedCount = 0;
 	private previousKittyImageIds = new Set<number>();
+	private committedComponent: Component | undefined;
+	private committedLines: string[] = [];
+	private committedWidth = -1;
+	private committedDirty = true;
+	private committedJustRendered = false;
 	private previousWidth = 0;
 	private previousHeight = 0;
 	private cursorRow = 0;
 	private hardwareCursorRow = 0;
 	private maxLinesRendered = 0;
 	private previousViewportTop = 0;
+
+	/**
+	 * Set the component whose rendered lines form the committed (immutable) transcript prefix.
+	 * The renderer caches its output per width and only re-renders it when the width changes or
+	 * {@link invalidateCommitted} is called.
+	 */
+	setCommittedComponent(component: Component | undefined): void {
+		this.committedComponent = component;
+		this.committedLines = [];
+		this.committedWidth = -1;
+		this.committedDirty = true;
+		this.requestRender();
+	}
+
+	/** Mark the committed prefix dirty so it is re-rendered on the next frame. */
+	invalidateCommitted(): void {
+		this.committedDirty = true;
+		this.requestRender();
+	}
+
+	override invalidate(): void {
+		super.invalidate();
+		this.committedDirty = true;
+	}
+
+	private renderCommitted(width: number): string[] {
+		this.committedJustRendered = false;
+		if (!this.committedComponent) {
+			this.committedLines = [];
+			this.committedWidth = width;
+			return this.committedLines;
+		}
+		if (!this.committedDirty && this.committedWidth === width) {
+			return this.committedLines;
+		}
+		this.committedLines = this.committedComponent.render(width);
+		this.committedWidth = width;
+		this.committedDirty = false;
+		this.committedJustRendered = true;
+		return this.committedLines;
+	}
+
+	/**
+	 * Store a rendered frame as the comparison baseline. When `rebuild` is true the flat
+	 * `previousLines` array is recreated from `head`/`tail`, otherwise the committed prefix is
+	 * retained in place and only the live tail is rewritten.
+	 */
+	private recordFrame(head: string[], tail: string[], rebuild: boolean): void {
+		if (head.length === 0) {
+			this.previousLines = tail;
+			this.previousCommittedCount = 0;
+			return;
+		}
+		if (rebuild) {
+			this.previousLines = head.slice();
+		} else {
+			this.previousLines.length = head.length;
+		}
+		for (const line of tail) this.previousLines.push(line);
+		this.previousCommittedCount = head.length;
+	}
+
+	protected override getMountedRoots(): readonly Component[] {
+		return this.committedComponent ? [...this.children, this.committedComponent] : this.children;
+	}
 
 	captureRenderState(): TuiMainScreenRenderState {
 		return {
@@ -146,6 +217,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 
 	restoreRenderState(state: TuiMainScreenRenderState): void {
 		this.previousLines = state.previousLines.map((line) => (isImageLine(line) ? "" : line));
+		this.previousCommittedCount = 0;
 		this.previousKittyImageIds = new Set();
 		this.previousWidth = state.previousWidth;
 		this.previousHeight = state.previousHeight;
@@ -157,6 +229,10 @@ export class TuiMainScreen extends TuiBase implements TUI {
 
 	protected override resetRenderState(): void {
 		this.previousLines = [];
+		this.previousCommittedCount = 0;
+		this.committedLines = [];
+		this.committedWidth = -1;
+		this.committedDirty = true;
 		this.previousWidth = -1;
 		this.previousHeight = -1;
 		this.cursorRow = 0;
@@ -185,11 +261,12 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		return ids;
 	}
 
-	private rangeHasKittyImages(lines: readonly string[], from: number, to: number): boolean {
+	private rangeHasKittyImages(head: readonly string[], tail: readonly string[], from: number, to: number): boolean {
 		const start = Math.max(0, from);
-		const end = Math.min(to, lines.length - 1);
+		const end = Math.min(to, head.length + tail.length - 1);
 		for (let i = start; i <= end; i++) {
-			if (extractKittyImageIds(lines[i] ?? "").length > 0) return true;
+			const line = i < head.length ? (head[i] ?? "") : (tail[i - head.length] ?? "");
+			if (extractKittyImageIds(line).length > 0) return true;
 		}
 		return false;
 	}
@@ -269,31 +346,55 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			return targetScreenRow - currentScreenRow;
 		};
 
-		// Render all components to get new lines
-		let newLines = this.render(width);
+		// Render the committed prefix (cached) and the live tail separately. Only the tail is
+		// re-rendered every frame; the prefix is re-rendered on width change or invalidation.
+		let head = this.renderCommitted(width);
+		const committedRefreshed = this.committedJustRendered;
+		let tail = this.render(width);
 
 		// Composite overlays into the rendered lines (before differential compare)
 		if (this.hasOverlayEntries) {
-			newLines = this.compositeOverlays(newLines, width, height);
+			head = this.compositeOverlays(head.concat(tail), width, height);
+			tail = [];
 		}
 
+		const lineAt = (index: number): string =>
+			index < head.length ? (head[index] ?? "") : (tail[index - head.length] ?? "");
+		let totalLines = head.length + tail.length;
+		const materialize = (): string[] => (head.length === 0 ? tail.slice() : head.concat(tail));
+		// The committed prefix is stable when it was not re-rendered and did not shrink. Overlay
+		// compositing and kitty materialization replace `head` with a flat array, forcing a rebuild.
+		const previousTotal = this.previousLines.length;
+		let rebuild =
+			committedRefreshed ||
+			this.hasOverlayEntries ||
+			head.length !== this.previousCommittedCount ||
+			head.length > previousTotal;
+
 		// Extract cursor position before formatting line resets (marker must be found first)
-		const cursorPos = this.extractCursorPosition(newLines, height);
+		const cursorPos =
+			tail.length > 0
+				? (() => {
+						const pos = this.extractCursorPosition(tail, height);
+						return pos ? { row: pos.row + head.length, col: pos.col } : null;
+					})()
+				: this.extractCursorPosition(head, height);
 
 		// Helper to clear scrollback and viewport and render all new lines
 		const fullRender = (clear: boolean): void => {
 			this.fullRedrawCount += 1;
+			const renderLines = materialize();
 			const output = new BoundedTerminalWriter((data) => this.terminal.write(data));
 			output.append("\x1b[?2026h"); // Begin synchronized output
 			if (clear) {
 				output.append(this.deleteKittyImages(this.previousKittyImageIds));
 				output.append("\x1b[2J\x1b[H\x1b[3J"); // Clear screen, home, then clear scrollback
 			}
-			for (let i = 0; i < newLines.length; i++) {
+			for (let i = 0; i < renderLines.length; i++) {
 				if (i > 0) output.append("\r\n");
-				const line = newLines[i];
+				const line = renderLines[i];
 				const isImage = isImageLine(line);
-				const imageReservedRows = isImage ? this.getKittyImageReservedRows(newLines, i) : 1;
+				const imageReservedRows = isImage ? this.getKittyImageReservedRows(renderLines, i) : 1;
 				if (imageReservedRows > 1 && imageReservedRows <= height) {
 					for (let row = 1; row < imageReservedRows; row++) {
 						output.append("\r\n");
@@ -308,19 +409,19 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			}
 			output.append("\x1b[?2026l"); // End synchronized output
 			output.flush();
-			this.cursorRow = Math.max(0, newLines.length - 1);
+			this.cursorRow = Math.max(0, renderLines.length - 1);
 			this.hardwareCursorRow = this.cursorRow;
 			// Reset max lines when clearing, otherwise track growth
 			if (clear) {
-				this.maxLinesRendered = newLines.length;
+				this.maxLinesRendered = renderLines.length;
 			} else {
-				this.maxLinesRendered = Math.max(this.maxLinesRendered, newLines.length);
+				this.maxLinesRendered = Math.max(this.maxLinesRendered, renderLines.length);
 			}
-			const bufferLength = Math.max(height, newLines.length);
+			const bufferLength = Math.max(height, renderLines.length);
 			this.previousViewportTop = Math.max(0, bufferLength - height);
-			this.positionHardwareCursor(cursorPos, newLines.length);
-			this.previousLines = newLines;
-			this.previousKittyImageIds = this.collectKittyImageIds(newLines);
+			this.positionHardwareCursor(cursorPos, renderLines.length);
+			this.recordFrame(head, tail, true);
+			this.previousKittyImageIds = this.collectKittyImageIds(renderLines);
 			this.previousWidth = width;
 			this.previousHeight = height;
 		};
@@ -329,7 +430,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		const logRedraw = (reason: string): void => {
 			if (redrawLogDirectory === undefined) return;
 			const logPath = path.join(redrawLogDirectory, "pi-tui-debug.log");
-			const msg = `[${new Date().toISOString()}] fullRender: ${reason} (prev=${this.previousLines.length}, new=${newLines.length}, height=${height})\n`;
+			const msg = `[${new Date().toISOString()}] fullRender: ${reason} (prev=${this.previousLines.length}, new=${totalLines}, height=${height})\n`;
 			fs.mkdirSync(path.dirname(logPath), { recursive: true });
 			fs.appendFileSync(logPath, msg);
 		};
@@ -360,19 +461,21 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		// Content shrunk below the working area and no overlays - re-render to clear empty rows
 		// (overlays need the padding, so only do this when no overlays are active)
 		// Configurable via setClearOnShrink()
-		if (this.getClearOnShrink() && newLines.length < this.maxLinesRendered && !this.hasOverlayEntries) {
+		if (this.getClearOnShrink() && totalLines < this.maxLinesRendered && !this.hasOverlayEntries) {
 			logRedraw(`clearOnShrink (maxLinesRendered=${this.maxLinesRendered})`);
 			fullRender(true);
 			return;
 		}
 
-		// Find first and last changed lines
+		// Find first and last changed lines. When the committed prefix is stable, only the live
+		// tail can change, so the comparison starts at the committed boundary.
+		const compareStart = rebuild ? 0 : this.previousCommittedCount;
 		let firstChanged = -1;
 		let lastChanged = -1;
-		const maxLines = Math.max(newLines.length, this.previousLines.length);
-		for (let i = 0; i < maxLines; i++) {
-			const oldLine = i < this.previousLines.length ? this.previousLines[i] : "";
-			const newLine = i < newLines.length ? newLines[i] : "";
+		const maxLines = Math.max(totalLines, previousTotal);
+		for (let i = compareStart; i < maxLines; i++) {
+			const oldLine = i < previousTotal ? (this.previousLines[i] ?? "") : "";
+			const newLine = i < totalLines ? lineAt(i) : "";
 
 			if (oldLine !== newLine) {
 				if (firstChanged === -1) {
@@ -381,40 +484,49 @@ export class TuiMainScreen extends TuiBase implements TUI {
 				lastChanged = i;
 			}
 		}
-		const appendedLines = newLines.length > this.previousLines.length;
+		const appendedLines = totalLines > previousTotal;
 		if (appendedLines) {
 			if (firstChanged === -1) {
-				firstChanged = this.previousLines.length;
+				firstChanged = previousTotal;
 			}
-			lastChanged = newLines.length - 1;
+			lastChanged = totalLines - 1;
 		}
+		let newLines = head;
 		let trackKittyImages = this.previousKittyImageIds.size > 0;
 		if (firstChanged !== -1) {
-			if (trackKittyImages || this.rangeHasKittyImages(newLines, firstChanged, lastChanged)) {
+			if (trackKittyImages || this.rangeHasKittyImages(head, tail, firstChanged, lastChanged)) {
+				if (tail.length > 0) {
+					head = materialize();
+					tail = [];
+					totalLines = head.length;
+					newLines = head;
+					rebuild = true;
+				}
 				const expandedRange = this.expandChangedRangeForKittyImages(firstChanged, lastChanged, newLines);
 				firstChanged = expandedRange.firstChanged;
 				lastChanged = expandedRange.lastChanged;
 				trackKittyImages = true;
 			}
 		}
-		const appendStart = appendedLines && firstChanged === this.previousLines.length && firstChanged > 0;
+		const appendStart = appendedLines && firstChanged === previousTotal && firstChanged > 0;
 
 		// No changes - but still need to update hardware cursor position if it moved
 		if (firstChanged === -1) {
-			this.positionHardwareCursor(cursorPos, newLines.length);
+			this.positionHardwareCursor(cursorPos, totalLines);
 			this.previousViewportTop = prevViewportTop;
 			this.previousHeight = height;
+			this.previousCommittedCount = head.length;
 			return;
 		}
 
 		// All changes are in deleted lines (nothing to render, just clear)
-		if (firstChanged >= newLines.length) {
-			if (this.previousLines.length > newLines.length) {
+		if (firstChanged >= totalLines) {
+			if (previousTotal > totalLines) {
 				const output = new BoundedTerminalWriter((data) => this.terminal.write(data));
 				output.append("\x1b[?2026h");
 				output.append(this.deleteChangedKittyImages(firstChanged, lastChanged));
 				// Move to end of new content (clamp to 0 for empty content)
-				const targetRow = Math.max(0, newLines.length - 1);
+				const targetRow = Math.max(0, totalLines - 1);
 				if (targetRow < prevViewportTop) {
 					logRedraw(`deleted lines moved viewport up (${targetRow} < ${prevViewportTop})`);
 					fullRender(true);
@@ -425,13 +537,13 @@ export class TuiMainScreen extends TuiBase implements TUI {
 				else if (lineDiff < 0) output.append(`\x1b[${-lineDiff}A`);
 				output.append("\r");
 				// Clear extra lines without scrolling
-				const extraLines = this.previousLines.length - newLines.length;
+				const extraLines = previousTotal - totalLines;
 				if (extraLines > height) {
 					logRedraw(`extraLines > height (${extraLines} > ${height})`);
 					fullRender(true);
 					return;
 				}
-				const clearStartOffset = newLines.length === 0 ? 0 : 1;
+				const clearStartOffset = totalLines === 0 ? 0 : 1;
 				if (extraLines > 0 && clearStartOffset > 0) {
 					output.append(`\x1b[${clearStartOffset}B`);
 				}
@@ -448,8 +560,8 @@ export class TuiMainScreen extends TuiBase implements TUI {
 				this.cursorRow = targetRow;
 				this.hardwareCursorRow = targetRow;
 			}
-			this.positionHardwareCursor(cursorPos, newLines.length);
-			this.previousLines = newLines;
+			this.positionHardwareCursor(cursorPos, totalLines);
+			this.recordFrame(head, tail, rebuild);
 			if (trackKittyImages) this.previousKittyImageIds = this.collectKittyImageIds(newLines);
 			else this.previousKittyImageIds.clear();
 			this.previousWidth = width;
@@ -498,10 +610,10 @@ export class TuiMainScreen extends TuiBase implements TUI {
 
 		// Only render changed lines (firstChanged to lastChanged), not all lines to end
 		// This reduces flicker when only a single line changes (e.g., spinner animation)
-		const renderEnd = Math.min(lastChanged, newLines.length - 1);
+		const renderEnd = Math.min(lastChanged, totalLines - 1);
 		for (let i = firstChanged; i <= renderEnd; i++) {
 			if (i > firstChanged) output.append("\r\n");
-			const line = newLines[i];
+			const line = lineAt(i);
 			const isImage = isImageLine(line);
 			const imageReservedRows = isImage ? this.getKittyImageReservedRows(newLines, i, renderEnd) : 1;
 			if (imageReservedRows > 1) {
@@ -530,13 +642,14 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			if (!isImage && visibleWidth(outputLine) > width) {
 				// Log all lines to crash file for debugging
 				const crashLogPath = path.join(this.logDirectory ?? os.tmpdir(), "pi-tui-crash.log");
+				const crashLines = materialize();
 				const crashData = [
 					`Crash at ${new Date().toISOString()}`,
 					`Terminal width: ${width}`,
 					`Line ${i} visible width: ${visibleWidth(outputLine)}`,
 					"",
 					"=== All rendered lines ===",
-					...newLines.map((l, idx) => `[${idx}] (w=${visibleWidth(l)}) ${l}`),
+					...crashLines.map((l, idx) => `[${idx}] (w=${visibleWidth(l)}) ${l}`),
 					"",
 				].join("\n");
 				fs.mkdirSync(path.dirname(crashLogPath), { recursive: true });
@@ -562,15 +675,15 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		let finalCursorRow = renderEnd;
 
 		// If we had more lines before, clear them and move cursor back
-		if (this.previousLines.length > newLines.length) {
+		if (previousTotal > totalLines) {
 			// Move to end of new content first if we stopped before it
-			if (renderEnd < newLines.length - 1) {
-				const moveDown = newLines.length - 1 - renderEnd;
+			if (renderEnd < totalLines - 1) {
+				const moveDown = totalLines - 1 - renderEnd;
 				output.append(`\x1b[${moveDown}B`);
-				finalCursorRow = newLines.length - 1;
+				finalCursorRow = totalLines - 1;
 			}
-			const extraLines = this.previousLines.length - newLines.length;
-			for (let i = newLines.length; i < this.previousLines.length; i++) {
+			const extraLines = previousTotal - totalLines;
+			for (let i = totalLines; i < previousTotal; i++) {
 				output.append("\r\n\x1b[2K");
 			}
 			// Move cursor back to end of new content
@@ -583,6 +696,7 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			const debugDir = "/tmp/tui";
 			fs.mkdirSync(debugDir, { recursive: true });
 			const debugPath = path.join(debugDir, `render-${Date.now()}-${Math.random().toString(36).slice(2)}.log`);
+			const debugLines = materialize();
 			const debugData = [
 				`firstChanged: ${firstChanged}`,
 				`viewportTop: ${viewportTop}`,
@@ -593,11 +707,11 @@ export class TuiMainScreen extends TuiBase implements TUI {
 				`renderEnd: ${renderEnd}`,
 				`finalCursorRow: ${finalCursorRow}`,
 				`cursorPos: ${JSON.stringify(cursorPos)}`,
-				`newLines.length: ${newLines.length}`,
+				`newLines.length: ${totalLines}`,
 				`previousLines.length: ${this.previousLines.length}`,
 				"",
 				"=== newLines ===",
-				JSON.stringify(newLines, null, 2),
+				JSON.stringify(debugLines, null, 2),
 				"",
 				"=== previousLines ===",
 				JSON.stringify(this.previousLines, null, 2),
@@ -613,16 +727,16 @@ export class TuiMainScreen extends TuiBase implements TUI {
 		// Track cursor position for next render
 		// cursorRow tracks end of content (for viewport calculation)
 		// hardwareCursorRow tracks actual terminal cursor position (for movement)
-		this.cursorRow = Math.max(0, newLines.length - 1);
+		this.cursorRow = Math.max(0, totalLines - 1);
 		this.hardwareCursorRow = finalCursorRow;
 		// Track terminal's working area (grows but doesn't shrink unless cleared)
-		this.maxLinesRendered = Math.max(this.maxLinesRendered, newLines.length);
+		this.maxLinesRendered = Math.max(this.maxLinesRendered, totalLines);
 		this.previousViewportTop = Math.max(prevViewportTop, finalCursorRow - height + 1);
 
 		// Position hardware cursor for IME
-		this.positionHardwareCursor(cursorPos, newLines.length);
+		this.positionHardwareCursor(cursorPos, totalLines);
 
-		this.previousLines = newLines;
+		this.recordFrame(head, tail, rebuild);
 		if (trackKittyImages) this.previousKittyImageIds = this.collectKittyImageIds(newLines);
 		else this.previousKittyImageIds.clear();
 		this.previousWidth = width;
