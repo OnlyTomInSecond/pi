@@ -570,12 +570,20 @@ export class TuiMainScreen extends TuiBase implements TUI {
 			return;
 		}
 
-		// Differential rendering can only touch what was actually visible.
-		// If the first changed line is above the previous viewport, we need a full redraw.
+		// Differential rendering can only touch what was actually visible. Committed-prefix
+		// refreshes (theme, width, invalidation) and frames without a committed prefix still need a
+		// full redraw when a change landed above the viewport.
 		if (firstChanged < prevViewportTop) {
-			logRedraw(`firstChanged < viewportTop (${firstChanged} < ${prevViewportTop})`);
-			fullRender(true);
-			return;
+			if (!this.committedComponent || committedRefreshed || rebuild) {
+				logRedraw(`firstChanged < viewportTop (${firstChanged} < ${prevViewportTop})`);
+				fullRender(true);
+				return;
+			}
+			// A live change scrolled above the viewport (e.g. a reflowing streaming message taller
+			// than the screen). Those lines are in terminal scrollback and cannot be rewritten;
+			// repaint from the viewport top instead of clearing scrollback and replaying history,
+			// which would yank the user back to the bottom while they read earlier output.
+			firstChanged = Math.min(prevViewportTop, totalLines - 1);
 		}
 
 		// Render from first changed line to end
@@ -744,7 +752,9 @@ export class TuiMainScreen extends TuiBase implements TUI {
 	}
 
 	/**
-	 * Position the hardware cursor for IME candidate window.
+	 * Position the hardware cursor for IME candidate window. The cursor is positioned even when it is
+	 * hidden: terminals such as Alacritty anchor the IME candidate window to the (invisible) hardware
+	 * cursor position. `showHardwareCursor` only controls visibility, not whether we position it.
 	 * @param cursorPos The cursor position extracted from rendered output, or null
 	 * @param totalLines Total number of rendered lines
 	 */

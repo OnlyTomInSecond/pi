@@ -6,6 +6,7 @@
 
 - Reduced regular-mode render cost for long transcripts by formatting only the lines that are actually written and skipping Kitty image scans when no images are present.
 - Added a committed transcript prefix to the main-screen renderer: finalized history is rendered and cached once per width, so steady frames only render and diff the live tail.
+- Kept the main-screen viewport stable while reading scrollback: the hidden hardware cursor is no longer repositioned every frame, and live changes that scrolled above the viewport repaint from the viewport top instead of clearing scrollback and replaying the transcript.
 
 ## [0.86.1] - 2026-09-20
 
