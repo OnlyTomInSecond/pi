@@ -4,6 +4,16 @@ import {
 	type AltScreenSearchMatch,
 	getAltScreenSearchMatchKey,
 } from "./alt-screen-search.ts";
+import {
+	applySelectionHighlight,
+	getLineSelection,
+	getSelectionBounds,
+	getSelectionColumns,
+	getWordSelection,
+	type SelectionGranularity,
+	type SelectionPoint,
+	type SelectionRange,
+} from "./alt-screen-selection.ts";
 import { AltScreenFlashContainer } from "./components/alt-screen-flash.ts";
 import { ScrollView } from "./components/scroll-view.ts";
 import { getKeybindings } from "./keybindings.ts";
@@ -50,9 +60,7 @@ import {
 } from "./tui.ts";
 import {
 	extractAnsiCode,
-	getGraphemeCellRange,
 	getOsc8LinkAtColumn,
-	getWordSegmenter,
 	sliceByColumn,
 	stripTerminalSequences,
 	truncateToWidth,
@@ -79,31 +87,12 @@ const MAX_CACHED_OFFSCREEN_KITTY_TRANSMISSION_BYTES = 32 * 1024 * 1024;
 const MAX_CACHED_OFFSCREEN_KITTY_DECODED_BYTES = 64 * 1024 * 1024;
 const DOUBLE_CLICK_INTERVAL_MS = 500;
 const COPY_ERROR_FLASH_DURATION_MS = 5000;
-// Regular mode delegates double-click selection to the terminal emulator. Fullscreen owns mouse selection,
-// so mirror common terminal word-selection behavior by keeping paths and kebab-case tokens whole.
-const TERMINAL_WORD_SELECTION_JOINERS = new Set(["/", "-"]);
-const wordSegmenter = getWordSegmenter();
 
 interface CachedKittyImage {
 	transmissionGeneration: number;
 	transmissionBytes: number;
 	estimatedDecodedBytes: number;
 }
-
-interface SelectionPoint {
-	row: number;
-	col: number;
-	scrollView?: ScrollView;
-	/** Whether this point lies between terminal cells rather than on a cell. */
-	boundary?: boolean;
-}
-
-interface SelectionRange {
-	start: SelectionPoint;
-	end: SelectionPoint;
-}
-
-type SelectionGranularity = "character" | "word" | "line";
 
 interface ClickTarget {
 	timestamp: number;
@@ -659,7 +648,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private handleViewportInput(data: string): { consume?: boolean } | undefined {
 		if (data === FOCUS_OUT) {
 			const hadActiveSelection = this.selectionPressActive;
-			const hadNonEmptyActiveSelection = hadActiveSelection && this.getSelectionBounds() !== undefined;
+			const hadNonEmptyActiveSelection =
+				hadActiveSelection && getSelectionBounds(this.selectionAnchor, this.selectionFocus) !== undefined;
 			this.selectionPressActive = false;
 			this.stopSelectionAutoScroll();
 			this.stopScrollbarHover();
@@ -1156,56 +1146,16 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		return this.previousScreen[point.row] ?? "";
 	}
 
-	private getWordSelection(point: SelectionPoint): SelectionRange | undefined {
-		const line = stripTerminalSequences(this.getSelectionSourceLine(point));
-		const segments: Array<{ start: number; end: number; selectable: boolean; joiner: boolean }> = [];
-		let start = 0;
-		for (const segment of wordSegmenter.segment(line)) {
-			const end = start + visibleWidth(segment.segment);
-			const joiner = TERMINAL_WORD_SELECTION_JOINERS.has(segment.segment);
-			segments.push({ start, end, selectable: segment.isWordLike === true || joiner, joiner });
-			start = end;
-		}
-		const clickedSegmentIndex = segments.findIndex(
-			(segment) => point.col >= segment.start && point.col < segment.end,
-		);
-		if (clickedSegmentIndex < 0) return undefined;
-
-		const canJoin = (
-			left: { selectable: boolean; joiner: boolean },
-			right: { selectable: boolean; joiner: boolean },
-		): boolean => left.selectable && right.selectable && (left.joiner || right.joiner);
-		let selectionStart = segments[clickedSegmentIndex].start;
-		let selectionEnd = segments[clickedSegmentIndex].end;
-		for (let index = clickedSegmentIndex; index > 0 && canJoin(segments[index - 1], segments[index]); index--) {
-			selectionStart = segments[index - 1].start;
-		}
-		for (
-			let index = clickedSegmentIndex;
-			index < segments.length - 1 && canJoin(segments[index], segments[index + 1]);
-			index++
-		) {
-			selectionEnd = segments[index + 1].end;
-		}
-		return {
-			start: { ...point, col: selectionStart },
-			end: { ...point, col: selectionEnd, boundary: true },
-		};
-	}
-
-	private getLineSelection(point: SelectionPoint): SelectionRange {
-		return {
-			start: { ...point, col: 0 },
-			end: { ...point, col: visibleWidth(this.getSelectionSourceLine(point)), boundary: true },
-		};
-	}
-
 	private updateSelectionFocus(point: SelectionPoint): void {
 		if (this.selectionGranularity === "character" || !this.selectionInitialRange) {
 			this.selectionFocus = point;
 			return;
 		}
-		const range = this.selectionGranularity === "word" ? this.getWordSelection(point) : this.getLineSelection(point);
+		const sourceLine = this.getSelectionSourceLine(point);
+		const range =
+			this.selectionGranularity === "word"
+				? getWordSelection(sourceLine, point)
+				: getLineSelection(sourceLine, point);
 		if (!range) return;
 		const initial = this.selectionInitialRange;
 		const targetBeforeInitial =
@@ -1364,9 +1314,14 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				? getScrollViewsAt(this.currentLayout, event.x, event.y)[0]
 				: undefined;
 		const anchor = this.getSelectionPoint(event, scrollView);
-		const word = this.getWordSelection(anchor);
+		const word = getWordSelection(this.getSelectionSourceLine(anchor), anchor);
 		const clickCount = this.getClickCount(anchor, word);
-		const range = clickCount === 2 ? word : clickCount === 3 ? this.getLineSelection(anchor) : undefined;
+		const range =
+			clickCount === 2
+				? word
+				: clickCount === 3
+					? getLineSelection(this.getSelectionSourceLine(anchor), anchor)
+					: undefined;
 		this.selectionGranularity = range ? (clickCount === 2 ? "word" : "line") : "character";
 		this.selectionInitialRange = range;
 		this.selectionAnchor = range?.start ?? anchor;
@@ -1381,46 +1336,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.requestRender();
 	}
 
-	private getSelectionBounds(): { start: SelectionPoint; end: SelectionPoint } | undefined {
-		if (!this.selectionAnchor || !this.selectionFocus) return undefined;
-		if (this.selectionAnchor.scrollView !== this.selectionFocus.scrollView) return undefined;
-		const anchorBeforeFocus =
-			this.selectionAnchor.row < this.selectionFocus.row ||
-			(this.selectionAnchor.row === this.selectionFocus.row && this.selectionAnchor.col < this.selectionFocus.col);
-		if (
-			this.selectionAnchor.row === this.selectionFocus.row &&
-			this.selectionAnchor.col === this.selectionFocus.col
-		) {
-			return undefined;
-		}
-		return anchorBeforeFocus
-			? { start: this.selectionAnchor, end: this.selectionFocus }
-			: { start: this.selectionFocus, end: this.selectionAnchor };
-	}
-
-	private getSelectionColumns(
-		line: string,
-		row: number,
-		selection: { start: SelectionPoint; end: SelectionPoint },
-		minColumn = 0,
-		maxColumn = visibleWidth(line),
-	): { start: number; end: number } {
-		const lineWidth = visibleWidth(line);
-		let start = Math.max(0, minColumn);
-		let end = Math.min(lineWidth, maxColumn);
-		if (row === selection.start.row) {
-			start = getGraphemeCellRange(line, selection.start.col)?.start ?? Math.min(selection.start.col, lineWidth);
-		}
-		if (row === selection.end.row) {
-			end = selection.end.boundary
-				? Math.min(selection.end.col, lineWidth)
-				: (getGraphemeCellRange(line, selection.end.col)?.end ?? Math.min(selection.end.col + 1, lineWidth));
-		}
-		return { start: Math.max(minColumn, start), end: Math.min(maxColumn, end) };
-	}
-
 	private getActiveSelectionText(): string | undefined {
-		const selection = this.getSelectionBounds();
+		const selection = getSelectionBounds(this.selectionAnchor, this.selectionFocus);
 		if (!selection) return undefined;
 		let sourceLines: readonly string[] = this.previousScreen;
 		if (selection.start.scrollView) {
@@ -1432,7 +1349,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const lines: string[] = [];
 		for (let row = selection.start.row; row <= selection.end.row; row++) {
 			const line = sourceLines[row] ?? "";
-			const columns = this.getSelectionColumns(line, row, selection);
+			const columns = getSelectionColumns(line, row, selection);
 			lines.push(
 				stripTerminalSequences(
 					sliceByColumn(line, columns.start, Math.max(0, columns.end - columns.start), true),
@@ -1551,25 +1468,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		return result;
 	}
 
-	private applySelectionHighlight(text: string): string {
-		let result = "\x1b[7m";
-		let index = 0;
-		while (index < text.length) {
-			const ansi = extractAnsiCode(text, index);
-			if (!ansi) {
-				result += text[index];
-				index += 1;
-				continue;
-			}
-			result += ansi.code;
-			if (ansi.code.endsWith("m")) result += "\x1b[7m";
-			index += ansi.length;
-		}
-		return `${result}\x1b[27m`;
-	}
-
 	private applySelection(screen: string[], layout = this.currentLayout): string[] {
-		const selection = this.getSelectionBounds();
+		const selection = getSelectionBounds(this.selectionAnchor, this.selectionFocus);
 		if (!selection) return screen;
 		let screenSelection = selection;
 		let minRow = 0;
@@ -1608,12 +1508,12 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				return line;
 			}
 			const lineWidth = visibleWidth(line);
-			const columns = this.getSelectionColumns(line, row, screenSelection, minColumn, maxColumn);
+			const columns = getSelectionColumns(line, row, screenSelection, minColumn, maxColumn);
 			if (columns.end <= columns.start) return line;
 			const before = sliceByColumn(line, 0, columns.start, true);
 			const selected = sliceByColumn(line, columns.start, columns.end - columns.start, true);
 			const after = sliceByColumn(line, columns.end, Math.max(0, lineWidth - columns.end), true);
-			return `${before}${this.applySelectionHighlight(selected)}${after}`;
+			return `${before}${applySelectionHighlight(selected)}${after}`;
 		});
 	}
 
