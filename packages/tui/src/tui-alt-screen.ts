@@ -1,3 +1,4 @@
+import { AltScreenScrollbar } from "./alt-screen-scrollbar.ts";
 import {
 	AltScreenSearchComponent,
 	AltScreenSearchIndex,
@@ -16,7 +17,6 @@ import {
 	getScrollViewsAt,
 	type LayoutFrame,
 	renderLayoutFrame,
-	type ScrollbarGeometry,
 } from "./layout.ts";
 import { getLayoutNode } from "./layout-node.ts";
 import { BoundedTerminalWriter } from "./output-writer.ts";
@@ -89,16 +89,6 @@ interface WheelEvent {
 	x: number;
 	y: number;
 	button: number;
-}
-
-interface ScrollbarDrag {
-	scrollView: ScrollView;
-	grabOffset: number;
-}
-
-interface ScrollbarTarget {
-	scrollView: ScrollView;
-	geometry: ScrollbarGeometry;
 }
 
 interface ScrollToEndIndicatorRect {
@@ -174,8 +164,6 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private imageProtocol: ImageProtocol = null;
 	private savedCapabilities?: TerminalCapabilities;
 	private readonly uploadedKittyImages = new Map<number, CachedKittyImage>();
-	private scrollbarDrag?: ScrollbarDrag;
-	private scrollbarHover?: ScrollView;
 	private scrollToEndIndicatorRect?: ScrollToEndIndicatorRect;
 	private activeSearch?: ActiveSearch;
 	private mouseCapture?: TuiMouseDispatchTarget;
@@ -196,6 +184,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private readonly searchNavigationButtonStyle: (text: string, hovered: boolean) => string;
 	private readonly scrollToEndIndicator?: () => string;
 	private readonly onRightClickPaste?: () => void;
+	private readonly scrollbar: AltScreenScrollbar;
 	private readonly selection: AltScreenSelection;
 
 	constructor(
@@ -237,6 +226,11 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			},
 			options.copyOnSelect ?? true,
 		);
+		this.scrollbar = new AltScreenScrollbar({
+			getLayout: () => this.currentLayout,
+			hasOverlay: () => this.hasOverlay(),
+			clearSelection: () => this.selection.reset(),
+		});
 		this.addInputListener((data) => this.handleViewportInput(data));
 	}
 
@@ -287,8 +281,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 	protected override beforeTerminalStart(): void {
 		this.selection.cancelPress();
-		this.stopScrollbarHover();
-		this.stopScrollbarDrag();
+		this.scrollbar.reset();
 		this.flashes.dispose();
 		this.altScreenActive = true;
 		const capabilities = getCapabilities();
@@ -323,8 +316,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	protected override beforeTerminalStop(_options: TuiStopOptions): void {
 		this.closeSearch();
 		this.selection.cancelPress();
-		this.stopScrollbarHover();
-		this.stopScrollbarDrag();
+		this.scrollbar.reset();
 		this.clearComponentMouseGesture();
 		this.flashes.dispose();
 		if (!this.altScreenActive) return;
@@ -612,9 +604,9 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private handleViewportInput(data: string): { consume?: boolean } | undefined {
 		if (data === FOCUS_OUT) {
 			const hadNonEmptyActiveSelection = this.selection.handleFocusOut();
-			this.stopScrollbarHover();
+			this.scrollbar.stopHover();
 			if (this.activeSearch?.component.setHoveredNavigationDirection(undefined)) this.requestRender();
-			this.stopScrollbarDrag();
+			this.scrollbar.stopDrag();
 			this.clearComponentMouseGesture();
 			this.lastComponentClick = undefined;
 			if (hadNonEmptyActiveSelection) this.requestRender();
@@ -859,11 +851,11 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const overlay = this.dispatchMouseToOverlay(event);
 		if (!overlay.hit) {
 			if (this.handleScrollToEndIndicatorMouseEvent(raw)) return;
-			const scrollbarHandled = this.handleScrollbarMouseEvent(raw);
-			if (!this.scrollbarDrag) this.updateScrollbarHover(raw.x, raw.y);
+			const scrollbarHandled = this.scrollbar.handleMouseEvent(raw);
+			if (!this.scrollbar.isDragging()) this.scrollbar.updateHover(raw.x, raw.y);
 			if (scrollbarHandled) return;
 		} else {
-			this.stopScrollbarHover();
+			this.scrollbar.stopHover();
 		}
 
 		const result = overlay.result ?? (overlay.hit ? undefined : this.dispatchMouseToLayout(event));
@@ -927,7 +919,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		}
 		const primary = this.getPrimaryScrollView();
 		if (remaining !== 0 && !seen.has(primary)) primary.scrollBy(remaining);
-		this.updateScrollbarHover(event.x, event.y);
+		this.scrollbar.updateHover(event.x, event.y);
 		this.requestRender();
 	}
 
@@ -966,91 +958,6 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		if (event.y !== rect.row || event.x < rect.column || event.x >= rect.column + rect.width) return false;
 		this.scrollToBottom();
 		return true;
-	}
-
-	private getScrollbarTargetAt(x: number, y: number, includeHiddenAuto = false): ScrollbarTarget | undefined {
-		if (this.hasOverlay() || !this.currentLayout) return undefined;
-		for (const scrollView of getScrollViewsAt(this.currentLayout, x, y)) {
-			const box = getScrollViewBox(this.currentLayout, scrollView);
-			const geometry = box ? getScrollbarGeometry(box, includeHiddenAuto) : undefined;
-			if (
-				geometry &&
-				x === geometry.column &&
-				y >= geometry.trackTop &&
-				y < geometry.trackTop + geometry.trackHeight
-			) {
-				return { scrollView, geometry };
-			}
-		}
-		return undefined;
-	}
-
-	private setScrollbarHover(scrollView: ScrollView | undefined): void {
-		if (scrollView === this.scrollbarHover) return;
-		this.scrollbarHover?.setScrollbarActive(false);
-		this.scrollbarHover = scrollView;
-		this.scrollbarHover?.setScrollbarActive(true);
-	}
-
-	private updateScrollbarHover(x: number, y: number): void {
-		this.setScrollbarHover(this.getScrollbarTargetAt(x, y, true)?.scrollView);
-	}
-
-	private stopScrollbarHover(): void {
-		this.setScrollbarHover(undefined);
-	}
-
-	private scrollScrollbarToPointer(
-		scrollView: ScrollView,
-		geometry: ScrollbarGeometry,
-		pointerY: number,
-		grabOffset: number,
-	): void {
-		const maxThumbOffset = geometry.trackHeight - geometry.thumbHeight;
-		const thumbOffset = Math.max(0, Math.min(maxThumbOffset, pointerY - geometry.trackTop - grabOffset));
-		const scrollTop = maxThumbOffset === 0 ? 0 : Math.round((thumbOffset / maxThumbOffset) * geometry.maxScrollTop);
-		scrollView.scrollTo(scrollTop);
-	}
-
-	private handleScrollbarMouseEvent(event: SgrMouseEvent): boolean {
-		if (this.scrollbarDrag) {
-			if (event.release) {
-				this.stopScrollbarDrag();
-				return true;
-			}
-			const box = this.currentLayout
-				? getScrollViewBox(this.currentLayout, this.scrollbarDrag.scrollView)
-				: undefined;
-			const geometry = box ? getScrollbarGeometry(box) : undefined;
-			if (geometry) {
-				this.scrollScrollbarToPointer(
-					this.scrollbarDrag.scrollView,
-					geometry,
-					event.y,
-					this.scrollbarDrag.grabOffset,
-				);
-			}
-			return true;
-		}
-
-		if (event.release || (event.button & 32) !== 0 || (event.button & 3) !== 0) return false;
-		const target = this.getScrollbarTargetAt(event.x, event.y);
-		if (!target) return false;
-		this.selection.reset();
-		this.setScrollbarHover(target.scrollView);
-		const onThumb =
-			event.y >= target.geometry.thumbTop && event.y < target.geometry.thumbTop + target.geometry.thumbHeight;
-		const grabOffset = onThumb ? event.y - target.geometry.thumbTop : Math.floor(target.geometry.thumbHeight / 2);
-		if (!onThumb) this.scrollScrollbarToPointer(target.scrollView, target.geometry, event.y, grabOffset);
-		this.scrollbarDrag = {
-			scrollView: target.scrollView,
-			grabOffset,
-		};
-		return true;
-	}
-
-	private stopScrollbarDrag(): void {
-		this.scrollbarDrag = undefined;
 	}
 
 	private applySearchTextHighlight(text: string, current: boolean): string {
