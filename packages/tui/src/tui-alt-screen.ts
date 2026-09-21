@@ -1,10 +1,5 @@
 import { AltScreenScrollbar } from "./alt-screen-scrollbar.ts";
-import {
-	AltScreenSearchComponent,
-	AltScreenSearchIndex,
-	type AltScreenSearchMatch,
-	getAltScreenSearchMatchKey,
-} from "./alt-screen-search.ts";
+import { AltScreenSearch } from "./alt-screen-search-controller.ts";
 import { AltScreenSelection } from "./alt-screen-selection.ts";
 import { AltScreenFlashContainer } from "./components/alt-screen-flash.ts";
 import { ScrollView } from "./components/scroll-view.ts";
@@ -38,7 +33,6 @@ import {
 	CURSOR_MARKER,
 	compositeTuiLine,
 	dispatchMouseEvent,
-	type OverlayHandle,
 	retargetMouseEvent,
 	TuiBase,
 	type TuiMouseButton,
@@ -49,7 +43,7 @@ import {
 	VIEWPORT_TUI,
 	type ViewportTUI,
 } from "./tui.ts";
-import { extractAnsiCode, sliceByColumn, truncateToWidth, visibleWidth } from "./utils.ts";
+import { sliceByColumn, truncateToWidth, visibleWidth } from "./utils.ts";
 
 const ENTER_ALT_SCREEN = "\x1b[?1049h";
 const EXIT_ALT_SCREEN = "\x1b[?1049l";
@@ -95,26 +89,6 @@ interface ScrollToEndIndicatorRect {
 	row: number;
 	column: number;
 	width: number;
-}
-
-type SearchSelectionMode = "query" | "retain" | "next" | "previous";
-
-interface ActiveSearch {
-	component: AltScreenSearchComponent;
-	index: AltScreenSearchIndex;
-	overlay?: OverlayHandle;
-	query: string;
-	matches: AltScreenSearchMatch[];
-	selectedIndex: number;
-	selectedKey?: string;
-	anchorRow: number;
-	selectionMode: SearchSelectionMode;
-}
-
-interface SearchHighlightRange {
-	startCol: number;
-	endCol: number;
-	current: boolean;
 }
 
 export interface TuiAltScreenOptions {
@@ -165,7 +139,6 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private savedCapabilities?: TerminalCapabilities;
 	private readonly uploadedKittyImages = new Map<number, CachedKittyImage>();
 	private scrollToEndIndicatorRect?: ScrollToEndIndicatorRect;
-	private activeSearch?: ActiveSearch;
 	private mouseCapture?: TuiMouseDispatchTarget;
 	private mousePressTarget?: TuiMouseDispatchTarget;
 	private mousePressPoint?: { x: number; y: number };
@@ -179,12 +152,10 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	};
 	private readonly wheelScrollLines: number;
 	private readonly mouseEnabled: boolean;
-	private readonly searchMatchStyle: (text: string) => string;
-	private readonly searchCurrentMatchStyle: (text: string) => string;
-	private readonly searchNavigationButtonStyle: (text: string, hovered: boolean) => string;
 	private readonly scrollToEndIndicator?: () => string;
 	private readonly onRightClickPaste?: () => void;
 	private readonly scrollbar: AltScreenScrollbar;
+	private readonly search: AltScreenSearch;
 	private readonly selection: AltScreenSelection;
 
 	constructor(
@@ -205,9 +176,6 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.flashes = new AltScreenFlashContainer(() => this.requestRender());
 		this.wheelScrollLines = Math.max(1, Math.floor(options.wheelScrollLines ?? 1));
 		this.mouseEnabled = options.mouse ?? true;
-		this.searchMatchStyle = options.searchMatchStyle ?? ((text) => `\x1b[4m${text}\x1b[24m`);
-		this.searchCurrentMatchStyle = options.searchCurrentMatchStyle ?? ((text) => `\x1b[1;7m${text}\x1b[22;27m`);
-		this.searchNavigationButtonStyle = options.searchNavigationButtonStyle ?? ((text) => text);
 		this.scrollToEndIndicator = options.scrollToEndIndicator;
 		this.onRightClickPaste = options.onRightClickPaste;
 		this.selection = new AltScreenSelection(
@@ -231,6 +199,20 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			hasOverlay: () => this.hasOverlay(),
 			clearSelection: () => this.selection.reset(),
 		});
+		this.search = new AltScreenSearch(
+			{
+				getPrimaryScrollView: () => this.getPrimaryScrollView(),
+				getImplicitScrollView: () => this.implicitScrollView,
+				getColumns: () => this.terminal.columns,
+				requestRender: () => this.requestRender(),
+				showOverlay: (component, overlayOptions) => this.showOverlay(component, overlayOptions),
+			},
+			{
+				matchStyle: options.searchMatchStyle ?? ((text) => `\x1b[4m${text}\x1b[24m`),
+				currentMatchStyle: options.searchCurrentMatchStyle ?? ((text) => `\x1b[1;7m${text}\x1b[22;27m`),
+				navigationButtonStyle: options.searchNavigationButtonStyle ?? ((text) => text),
+			},
+		);
 		this.addInputListener((data) => this.handleViewportInput(data));
 	}
 
@@ -314,7 +296,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	}
 
 	protected override beforeTerminalStop(_options: TuiStopOptions): void {
-		this.closeSearch();
+		this.search.close();
 		this.selection.cancelPress();
 		this.scrollbar.reset();
 		this.clearComponentMouseGesture();
@@ -441,157 +423,13 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		}
 	}
 
-	private toggleSearch(): void {
-		if (this.activeSearch) {
-			this.closeSearch();
-			return;
-		}
-		const component = new AltScreenSearchComponent(
-			(query) => this.updateSearchQuery(query),
-			this.searchNavigationButtonStyle,
-		);
-		const search: ActiveSearch = {
-			component,
-			index: new AltScreenSearchIndex(),
-			query: "",
-			matches: [],
-			selectedIndex: -1,
-			anchorRow: this.getPrimaryScrollView().scrollTop,
-			selectionMode: "query",
-		};
-		this.activeSearch = search;
-		search.overlay = this.showOverlay(component, {
-			anchor: "top-right",
-			width: "40%",
-			minWidth: 32,
-			margin: 1,
-		});
-	}
-
-	private closeSearch(): void {
-		const search = this.activeSearch;
-		if (!search) return;
-		this.activeSearch = undefined;
-		search.overlay?.hide();
-		this.requestRender();
-	}
-
-	private updateSearchQuery(query: string): void {
-		const search = this.activeSearch;
-		if (!search || query === search.query) return;
-		const selected = search.matches[search.selectedIndex];
-		search.anchorRow = selected?.segments[0]?.row ?? this.getPrimaryScrollView().scrollTop;
-		search.query = query;
-		search.selectionMode = "query";
-		search.component.setResult(-1, 0);
-		this.requestRender();
-	}
-
-	private navigateSearch(direction: -1 | 1): void {
-		const search = this.activeSearch;
-		if (!search?.query) return;
-		search.selectionMode = direction < 0 ? "previous" : "next";
-		this.requestRender();
-	}
-
-	private getSearchNavigationDirectionAt(x: number, y: number): -1 | 1 | undefined {
-		const search = this.activeSearch;
-		const bounds = search?.overlay?.getBounds();
-		if (!search || !bounds) return undefined;
-		if (x < bounds.col || x >= bounds.col + bounds.width || y < bounds.row || y >= bounds.row + bounds.height) {
-			return undefined;
-		}
-		return search.component.getNavigationDirectionAt(y - bounds.row, x - bounds.col);
-	}
-
-	private handleSearchMouseEvent(event: SgrMouseEvent): boolean {
-		const search = this.activeSearch;
-		if (!search) return false;
-		const direction = this.getSearchNavigationDirectionAt(event.x, event.y);
-		if (search.component.setHoveredNavigationDirection(direction)) this.requestRender();
-		if (direction === undefined || event.release || (event.button & 32) !== 0 || (event.button & 3) !== 0) {
-			return false;
-		}
-		this.navigateSearch(direction);
-		return true;
-	}
-
-	private refreshSearch(layout: LayoutFrame): boolean {
-		const search = this.activeSearch;
-		if (!search) return false;
-		const scrollView = layout.primaryScrollView ?? this.implicitScrollView;
-		const box = getScrollViewBox(layout, scrollView);
-		const lines = box?.scrollContentLines;
-		if (!lines || !search.query.trim()) {
-			search.matches = [];
-			search.selectedIndex = -1;
-			search.selectedKey = undefined;
-			search.selectionMode = "retain";
-			search.component.setResult(-1, 0);
-			return false;
-		}
-
-		const shouldRevealSelection = search.selectionMode !== "retain";
-		const result = search.index.search(lines, search.query);
-		const matches = result.matches;
-		search.matches = matches;
-		if (!result.changed && search.selectionMode === "retain") return false;
-
-		const exactIndex = result.changed
-			? search.selectedKey
-				? matches.findIndex((match) => getAltScreenSearchMatchKey(match) === search.selectedKey)
-				: -1
-			: search.selectedIndex;
-		let selectedIndex = -1;
-		if (matches.length > 0) {
-			if (search.selectionMode === "query") {
-				let low = 0;
-				let high = matches.length;
-				while (low < high) {
-					const middle = low + Math.floor((high - low) / 2);
-					if ((matches[middle]!.segments[0]?.row ?? 0) < search.anchorRow) low = middle + 1;
-					else high = middle;
-				}
-				selectedIndex = low < matches.length ? low : 0;
-			} else if (search.selectionMode === "next") {
-				const baseIndex = exactIndex >= 0 ? exactIndex : Math.min(search.selectedIndex, matches.length - 1);
-				selectedIndex = baseIndex < 0 ? 0 : (baseIndex + 1) % matches.length;
-			} else if (search.selectionMode === "previous") {
-				const baseIndex = exactIndex >= 0 ? exactIndex : Math.min(search.selectedIndex, matches.length - 1);
-				selectedIndex = baseIndex < 0 ? matches.length - 1 : (baseIndex - 1 + matches.length) % matches.length;
-			} else {
-				selectedIndex =
-					exactIndex >= 0 ? exactIndex : Math.min(Math.max(0, search.selectedIndex), matches.length - 1);
-			}
-		}
-
-		search.selectedIndex = selectedIndex;
-		search.selectedKey = selectedIndex >= 0 ? getAltScreenSearchMatchKey(matches[selectedIndex]!) : undefined;
-		search.selectionMode = "retain";
-		search.component.setResult(selectedIndex, matches.length);
-		if (!shouldRevealSelection) return false;
-
-		const selected = matches[selectedIndex];
-		const firstSegment = selected?.segments[0];
-		const lastSegment = selected?.segments[selected.segments.length - 1];
-		if (!box || !firstSegment || !lastSegment || scrollView.viewportHeight <= 0) return false;
-		const before = scrollView.scrollTop;
-		const visibleBottom = before + scrollView.viewportHeight - 1;
-		let target = before;
-		if (firstSegment.row < before || lastSegment.row > visibleBottom) {
-			target = firstSegment.row - Math.floor(scrollView.viewportHeight / 3);
-		}
-		scrollView.scrollTo(target, { disableFollow: true });
-		return scrollView.scrollTop !== before;
-	}
-
 	/** Show a transient message in the alternate-screen flash stack. */
 	flash(message: string, durationMs?: number): void {
 		this.flashes.flash(message, durationMs);
 	}
 
 	private shouldDeferViewportInputToOverlay(): boolean {
-		return this.isOverlayFocused() && this.activeSearch?.overlay?.isFocused() !== true;
+		return this.isOverlayFocused() && !this.search.isFocused();
 	}
 
 	private clearComponentMouseGesture(): void {
@@ -605,7 +443,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		if (data === FOCUS_OUT) {
 			const hadNonEmptyActiveSelection = this.selection.handleFocusOut();
 			this.scrollbar.stopHover();
-			if (this.activeSearch?.component.setHoveredNavigationDirection(undefined)) this.requestRender();
+			this.search.clearHover();
 			this.scrollbar.stopDrag();
 			this.clearComponentMouseGesture();
 			this.lastComponentClick = undefined;
@@ -638,24 +476,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 		const keybindings = getKeybindings();
 		const isRelease = isKeyRelease(data);
-		if (keybindings.matches(data, "tui.altScreen.search")) {
-			if (!isRelease) this.toggleSearch();
-			return { consume: true };
-		}
-		if (this.activeSearch?.overlay?.isFocused()) {
-			if (keybindings.matches(data, "tui.altScreen.searchNext")) {
-				if (!isRelease) this.navigateSearch(1);
-				return { consume: true };
-			}
-			if (keybindings.matches(data, "tui.altScreen.searchPrevious")) {
-				if (!isRelease) this.navigateSearch(-1);
-				return { consume: true };
-			}
-			if (keybindings.matches(data, "tui.altScreen.searchClose")) {
-				if (!isRelease) this.closeSearch();
-				return { consume: true };
-			}
-		}
+		if (this.search.handleInput(data)) return { consume: true };
 		if (this.shouldDeferViewportInputToOverlay()) return undefined;
 		if (keybindings.matches(data, "tui.altScreen.pageUp")) {
 			if (!isRelease) {
@@ -846,7 +667,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			return;
 		}
 
-		if (this.handleSearchMouseEvent(raw)) return;
+		if (this.search.handleMouseEvent(raw)) return;
 
 		const overlay = this.dispatchMouseToOverlay(event);
 		if (!overlay.hit) {
@@ -960,89 +781,6 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		return true;
 	}
 
-	private applySearchTextHighlight(text: string, current: boolean): string {
-		const style = current ? this.searchCurrentMatchStyle : this.searchMatchStyle;
-		let result = "";
-		let plainStart = 0;
-		let index = 0;
-		while (index < text.length) {
-			const ansi = extractAnsiCode(text, index);
-			if (!ansi) {
-				index += 1;
-				continue;
-			}
-			if (index > plainStart) result += style(text.slice(plainStart, index));
-			result += ansi.code;
-			index += ansi.length;
-			plainStart = index;
-		}
-		if (plainStart < text.length) result += style(text.slice(plainStart));
-		return result;
-	}
-
-	private applySearchHighlights(screen: string[], layout: LayoutFrame): string[] {
-		const search = this.activeSearch;
-		if (!search || search.selectedIndex < 0 || search.matches.length === 0) return screen;
-		const scrollView = layout.primaryScrollView ?? this.implicitScrollView;
-		const box = getScrollViewBox(layout, scrollView);
-		if (!box) return screen;
-
-		const rangesByRow = new Map<number, SearchHighlightRange[]>();
-		const scrollbarColumn = getScrollbarGeometry(box)?.column;
-		const minRow = Math.max(0, box.rect.y, box.clip.y);
-		const maxRow = Math.min(screen.length, box.rect.y + box.rect.height, box.clip.y + box.clip.height);
-		const minColumn = Math.max(0, box.rect.x, box.clip.x);
-		const maxColumn = Math.min(
-			this.terminal.columns,
-			box.rect.x + box.rect.width,
-			box.clip.x + box.clip.width,
-			scrollbarColumn ?? Number.POSITIVE_INFINITY,
-		);
-		const minContentRow = scrollView.scrollTop + minRow - box.rect.y;
-		const maxContentRow = scrollView.scrollTop + maxRow - box.rect.y - 1;
-		let low = 0;
-		let high = search.matches.length;
-		while (low < high) {
-			const middle = low + Math.floor((high - low) / 2);
-			const match = search.matches[middle]!;
-			const lastRow = match.segments[match.segments.length - 1]?.row ?? -1;
-			if (lastRow < minContentRow) low = middle + 1;
-			else high = middle;
-		}
-		for (let matchIndex = low; matchIndex < search.matches.length; matchIndex++) {
-			const match = search.matches[matchIndex]!;
-			if ((match.segments[0]?.row ?? 0) > maxContentRow) break;
-			for (const segment of match.segments) {
-				const row = box.rect.y + segment.row - scrollView.scrollTop;
-				if (row < minRow || row >= maxRow) continue;
-				const startCol = Math.max(minColumn, box.rect.x + segment.startCol);
-				const endCol = Math.min(maxColumn, box.rect.x + segment.endCol);
-				if (endCol <= startCol) continue;
-				const ranges = rangesByRow.get(row) ?? [];
-				ranges.push({ startCol, endCol, current: matchIndex === search.selectedIndex });
-				rangesByRow.set(row, ranges);
-			}
-		}
-
-		const result = [...screen];
-		for (const [row, ranges] of rangesByRow) {
-			let line = result[row] ?? "";
-			if (isImageLine(line)) continue;
-			const lineWidth = visibleWidth(line);
-			for (const range of ranges.sort((a, b) => b.startCol - a.startCol)) {
-				const startCol = Math.min(range.startCol, lineWidth);
-				const endCol = Math.min(range.endCol, lineWidth);
-				if (endCol <= startCol) continue;
-				const before = sliceByColumn(line, 0, startCol, true);
-				const highlighted = sliceByColumn(line, startCol, endCol - startCol, true);
-				const after = sliceByColumn(line, endCol, Math.max(0, lineWidth - endCol), true);
-				line = `${before}${this.applySearchTextHighlight(highlighted, range.current)}${after}`;
-			}
-			result[row] = line;
-		}
-		return result;
-	}
-
 	private isMouseSequence(data: string): boolean {
 		return /^\x1b\[<\d+;\d+;\d+[Mm]$/.test(data) || (data.length === 6 && data.startsWith("\x1b[M"));
 	}
@@ -1091,11 +829,11 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const height = Math.max(1, this.terminal.rows);
 		const root = this.layoutRoot ?? this.implicitScrollView;
 		let nextLayout = renderLayoutFrame(root, width, height, () => this.requestRender());
-		if (this.refreshSearch(nextLayout)) {
+		if (this.search.refresh(nextLayout)) {
 			nextLayout = renderLayoutFrame(root, width, height, () => this.requestRender());
 		}
 		let screen = nextLayout.lines.map((line) => line.replace(OSC133_ZONE_PREFIX, ""));
-		screen = this.applySearchHighlights(screen, nextLayout);
+		screen = this.search.applyHighlights(screen, nextLayout);
 		screen = this.compositeScrollToEndIndicator(screen, nextLayout, width);
 		screen = this.compositeOverlays(screen, width, height);
 		if (screen.length > height) screen = screen.slice(screen.length - height);
