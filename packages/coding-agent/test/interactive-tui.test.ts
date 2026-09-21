@@ -133,6 +133,15 @@ describe("createInteractiveTui", () => {
 			options: { tuiMode?: TuiMode };
 			themeController: { rebindTui: () => void };
 			extensionTerminalInputSubscriptions: Set<never>;
+			documentContainer: Container;
+			committedTranscript: Container;
+			chatContainer: Container;
+			pendingMessagesContainer: Container;
+			statusContainer: Container;
+			widgetContainerAbove: Container;
+			editorContainer: Container;
+			widgetContainerBelow: Container;
+			footerContainer: Container;
 		};
 		const context = Object.assign(Object.create(InteractiveMode.prototype), {
 			runtimeHost: { session: { settingsManager: { getFullscreenCopyOnSelect: () => true } } },
@@ -142,6 +151,15 @@ describe("createInteractiveTui", () => {
 			options: { tuiMode: "regular" as TuiMode },
 			themeController: { rebindTui: () => {} },
 			extensionTerminalInputSubscriptions: new Set<never>(),
+			documentContainer: new Container(),
+			committedTranscript: new Container(),
+			chatContainer: new Container(),
+			pendingMessagesContainer: new Container(),
+			statusContainer: new Container(),
+			widgetContainerAbove: new Container(),
+			editorContainer: new Container(),
+			widgetContainerBelow: new Container(),
+			footerContainer: new Container(),
 		}) as SwitchContext;
 		stableUi = createInteractiveTuiReference(() => context.renderer);
 		context.ui = stableUi;
@@ -156,7 +174,7 @@ describe("createInteractiveTui", () => {
 		await terminal.waitForRender();
 
 		expect(stableUi.mode).toBe("fullscreen");
-		expect(context.renderer.children).toEqual([component]);
+		expect(context.renderer.children[0]).toBe(context.documentContainer);
 		expect(context.renderer.getFocusedComponent()).toBe(component);
 		expect(component.focused).toBe(true);
 		expect(invalidatedModes).toEqual(["fullscreen"]);

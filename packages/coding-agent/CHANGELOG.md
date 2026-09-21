@@ -24,6 +24,10 @@
 - Added the `context_with_system` extension event, which runs after `context` handlers on the full transcript including system messages and sends its result verbatim. See [`context_with_system`](docs/extensions.md#context_with_system).
 - Added per-model image resize profiles through `inputLimits.images.resize` in `models.json`, applied to file attachments, image reads, and tool-result images ([#9631](https://github.com/earendil-works/pi/issues/9631)).
 
+### Changed
+
+- Regular mode now commits finalized transcript entries to a cached prefix, so long sessions only re-render the live tail instead of the full history.
+
 ### Fixed
 
 - Fixed string context-edit replacements producing invalid assistant and tool-result message content instead of text blocks.

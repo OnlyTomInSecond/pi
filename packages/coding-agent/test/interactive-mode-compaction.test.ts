@@ -143,6 +143,13 @@ describe("InteractiveMode compaction events", () => {
 			defaultEditor: {},
 			statusContainer: { clear: vi.fn() },
 			chatContainer: { clear: vi.fn() },
+			committedTranscript: new Container(),
+			headerContainer: new Container(),
+			loadedResourcesContainer: new Container(),
+			resetTranscriptContainers: function (this: { chatContainer: { clear: () => void } }) {
+				this.chatContainer.clear();
+			},
+			commitFinalizedTranscript: vi.fn(),
 			sessionManager: { buildContextEntries: vi.fn().mockReturnValue([latestCompaction, previousCompaction]) },
 			renderSessionEntries: vi.fn(),
 			addMessageToChat: vi.fn(),

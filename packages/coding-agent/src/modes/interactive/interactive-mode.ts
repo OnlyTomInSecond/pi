@@ -412,6 +412,11 @@ export interface InteractiveModeOptions {
 	terminal?: Terminal;
 }
 
+/** Invalidate the main-screen committed transcript prefix after its components change. */
+function invalidateCommittedTranscript(renderer: TuiMainScreen | TuiAltScreen | undefined): void {
+	if (renderer instanceof TuiMainScreen) renderer.invalidateCommitted();
+}
+
 export class InteractiveMode {
 	private runtimeHost: AgentSessionRuntime;
 	private renderer: TuiMainScreen | TuiAltScreen;
@@ -419,6 +424,7 @@ export class InteractiveMode {
 	private mainScreenRenderState: TuiMainScreenRenderState | undefined;
 	private loadedResourcesContainer: Container;
 	private chatContainer: Container;
+	private committedTranscript: Container;
 	private documentContainer: Container;
 	private transcriptScrollView: TuiLayouts.ScrollView | undefined;
 	private fullscreenLayoutRoot: Component | undefined;
@@ -588,9 +594,11 @@ export class InteractiveMode {
 		this.headerContainer = new Container();
 		this.loadedResourcesContainer = new Container();
 		this.chatContainer = new Container();
+		this.committedTranscript = new Container();
+		this.committedTranscript.addChild(this.headerContainer);
+		this.committedTranscript.addChild(this.loadedResourcesContainer);
 		this.documentContainer = new Container();
-		this.documentContainer.addChild(this.headerContainer);
-		this.documentContainer.addChild(this.loadedResourcesContainer);
+		this.documentContainer.addChild(this.committedTranscript);
 		this.documentContainer.addChild(this.chatContainer);
 		this.pendingMessagesContainer = new Container();
 		this.statusContainer = new Container();
@@ -832,6 +840,52 @@ export class InteractiveMode {
 		}
 	}
 
+	/**
+	 * Build the TUI root children for a renderer. In regular mode the finalized transcript is a
+	 * committed prefix and only the live chat container is mounted; in fullscreen the combined
+	 * document is mounted and scrolled by the layout root.
+	 */
+	private interactiveTuiComponents(tui: TuiMainScreen | TuiAltScreen): readonly Component[] {
+		if (tui instanceof TuiMainScreen) {
+			tui.setCommittedComponent(this.committedTranscript);
+			return [
+				this.chatContainer,
+				this.pendingMessagesContainer,
+				this.statusContainer,
+				this.widgetContainerAbove,
+				this.editorContainer,
+				this.widgetContainerBelow,
+				this.footerContainer,
+			];
+		}
+		return [
+			this.documentContainer,
+			this.pendingMessagesContainer,
+			this.statusContainer,
+			this.widgetContainerAbove,
+			this.editorContainer,
+			this.widgetContainerBelow,
+			this.footerContainer,
+		];
+	}
+
+	/** Move finalized chat components into the committed transcript prefix. */
+	private commitFinalizedTranscript(): void {
+		if (this.chatContainer.children.length === 0) return;
+		const finalized = this.chatContainer.children.splice(0);
+		for (const component of finalized) this.committedTranscript.addChild(component);
+		invalidateCommittedTranscript(this.renderer);
+	}
+
+	/** Clear the transcript and restore the static header and resource sections. */
+	private resetTranscriptContainers(): void {
+		this.chatContainer.clear();
+		this.committedTranscript.clear();
+		this.committedTranscript.addChild(this.headerContainer);
+		this.committedTranscript.addChild(this.loadedResourcesContainer);
+		invalidateCommittedTranscript(this.renderer);
+	}
+
 	private stopInteractiveTui(fullscreenExitOutput: FullscreenExitOutput): void {
 		if (this.renderer.mode === "fullscreen" && fullscreenExitOutput === "transcript") {
 			while (this.renderer.hasOverlayEntries) this.renderer.hideOverlay();
@@ -846,7 +900,6 @@ export class InteractiveMode {
 		if (mode === previousUi.mode) return true;
 		if (previousUi.hasOverlayEntries) return false;
 
-		const components = [...previousUi.children];
 		const focus = previousUi.getFocusedComponent();
 		const terminal = previousUi.terminal;
 		const showHardwareCursor = previousUi.getShowHardwareCursor();
@@ -876,7 +929,7 @@ export class InteractiveMode {
 		}
 		this.renderer = nextUi;
 		this.options.tuiMode = mode;
-		this.mountInteractiveTui(nextUi, components);
+		this.mountInteractiveTui(nextUi, this.interactiveTuiComponents(nextUi));
 		nextUi.invalidate();
 		nextUi.setFocus(focus);
 		if (!startRenderer) return true;
@@ -932,15 +985,7 @@ export class InteractiveMode {
 		});
 		this.transcriptScrollView = viewport.transcript;
 		this.fullscreenLayoutRoot = viewport.root;
-		this.mountInteractiveTui(this.renderer, [
-			this.documentContainer,
-			this.pendingMessagesContainer,
-			this.statusContainer,
-			this.widgetContainerAbove,
-			this.editorContainer,
-			this.widgetContainerBelow,
-			this.footerContainer,
-		]);
+		this.mountInteractiveTui(this.renderer, this.interactiveTuiComponents(this.renderer));
 		// Accept text while startup completes, but only enable interrupt, exit, and submission feedback.
 		this.defaultEditor.onAction("app.clear", () => this.handleCtrlC());
 		this.defaultEditor.onCtrlD = () => this.handleCtrlD();
@@ -1699,6 +1744,7 @@ export class InteractiveMode {
 	}): void {
 		// Resource rendering is idempotent; chat clears no longer clear this separate container.
 		this.loadedResourcesContainer.clear();
+		invalidateCommittedTranscript(this.renderer);
 
 		const showListing = options?.force || this.options.verbose || !this.settingsManager.getQuietStartup();
 		const showDiagnostics = showListing || options?.showDiagnosticsWhenQuiet === true;
@@ -1949,7 +1995,7 @@ export class InteractiveMode {
 						return { cancelled: true };
 					}
 
-					this.chatContainer.clear();
+					this.resetTranscriptContainers();
 					this.renderInitialMessages();
 					if (result.editorText && !this.editor.getText().trim()) {
 						this.editor.setText(result.editorText);
@@ -2114,7 +2160,7 @@ export class InteractiveMode {
 
 	private renderCurrentSessionState(): void {
 		this.loadedResourcesContainer.clear();
-		this.chatContainer.clear();
+		this.resetTranscriptContainers();
 		this.pendingMessagesContainer.clear();
 		this.compactionQueuedMessages = [];
 		this.streamingComponent = undefined;
@@ -2284,9 +2330,11 @@ export class InteractiveMode {
 
 	private setHiddenThinkingLabel(label?: string): void {
 		this.hiddenThinkingLabel = label ?? this.defaultHiddenThinkingLabel;
-		for (const child of this.chatContainer.children) {
-			if (child instanceof AssistantMessageComponent) {
-				child.setHiddenThinkingLabel(this.hiddenThinkingLabel);
+		for (const container of [this.committedTranscript, this.chatContainer]) {
+			for (const child of container?.children ?? []) {
+				if (child instanceof AssistantMessageComponent) {
+					child.setHiddenThinkingLabel(this.hiddenThinkingLabel);
+				}
 			}
 		}
 		if (this.streamingComponent) {
@@ -2490,6 +2538,7 @@ export class InteractiveMode {
 		}
 
 		this.ui.requestRender();
+		invalidateCommittedTranscript(this.renderer);
 	}
 
 	private addExtensionTerminalInputListener(
@@ -3383,6 +3432,9 @@ export class InteractiveMode {
 					this.updatePendingMessagesDisplay();
 					this.ui.requestRender();
 				} else if (event.message.role === "assistant") {
+					// Everything already in the chat is finalized; promote it to the committed prefix so
+					// the streaming message is the only live content re-rendered per frame.
+					this.commitFinalizedTranscript();
 					this.streamingComponent = new AssistantMessageComponent(
 						undefined,
 						this.hideThinkingBlock,
@@ -3575,9 +3627,10 @@ export class InteractiveMode {
 					if (entries[0]?.type !== "compaction") {
 						throw new Error("Completed compaction is missing from the session context");
 					}
-					this.chatContainer.clear();
+					this.resetTranscriptContainers();
 					// The latest compaction is prepended for model context; append it below at its chronological position.
 					this.renderSessionEntries(entries.slice(1));
+					this.commitFinalizedTranscript();
 					this.addMessageToChat(
 						createCompactionSummaryMessage(
 							event.result.summary,
@@ -4068,6 +4121,7 @@ export class InteractiveMode {
 			const times = compactionCount === 1 ? "1 time" : `${compactionCount} times`;
 			this.showStatus(`Session compacted ${times}`);
 		}
+		this.commitFinalizedTranscript();
 	}
 
 	private renderProjectTrustWarningIfNeeded(): void {
@@ -4105,8 +4159,9 @@ export class InteractiveMode {
 	}
 
 	private rebuildChatFromMessages(): void {
-		this.chatContainer.clear();
+		this.resetTranscriptContainers();
 		this.renderSessionEntries(this.sessionManager.buildContextEntries());
+		this.commitFinalizedTranscript();
 	}
 
 	// =========================================================================
@@ -4406,23 +4461,27 @@ export class InteractiveMode {
 		if (isExpandable(activeHeader)) {
 			activeHeader.setExpanded(expanded);
 		}
-		for (const container of [this.loadedResourcesContainer, this.chatContainer]) {
-			for (const child of container.children) {
+		for (const container of [this.loadedResourcesContainer, this.committedTranscript, this.chatContainer]) {
+			for (const child of container?.children ?? []) {
 				if (isExpandable(child)) {
 					child.setExpanded(expanded);
 				}
 			}
 		}
+		invalidateCommittedTranscript(this.renderer);
 		this.showStatus(`Tool output: ${expanded ? "expanded" : "collapsed"}`);
 	}
 
 	/** Update rendered assistant messages without rebuilding live tool components. */
 	private updateThinkingBlockVisibility(): void {
-		for (const child of this.chatContainer.children) {
-			if (child instanceof AssistantMessageComponent) {
-				child.setHideThinkingBlock(this.hideThinkingBlock);
+		for (const container of [this.committedTranscript, this.chatContainer]) {
+			for (const child of container?.children ?? []) {
+				if (child instanceof AssistantMessageComponent) {
+					child.setHideThinkingBlock(this.hideThinkingBlock);
+				}
 			}
 		}
+		invalidateCommittedTranscript(this.renderer);
 		this.ui.requestRender();
 	}
 
@@ -4797,19 +4856,25 @@ export class InteractiveMode {
 					},
 					onShowImagesChange: (enabled) => {
 						this.settingsManager.setShowImages(enabled);
-						for (const child of this.chatContainer.children) {
-							if (child instanceof ToolExecutionComponent) {
-								child.setShowImages(enabled);
+						for (const container of [this.committedTranscript, this.chatContainer]) {
+							for (const child of container?.children ?? []) {
+								if (child instanceof ToolExecutionComponent) {
+									child.setShowImages(enabled);
+								}
 							}
 						}
+						invalidateCommittedTranscript(this.renderer);
 					},
 					onImageWidthCellsChange: (width) => {
 						this.settingsManager.setImageWidthCells(width);
-						for (const child of this.chatContainer.children) {
-							if (child instanceof ToolExecutionComponent) {
-								child.setImageWidthCells(width);
+						for (const container of [this.committedTranscript, this.chatContainer]) {
+							for (const child of container?.children ?? []) {
+								if (child instanceof ToolExecutionComponent) {
+									child.setImageWidthCells(width);
+								}
 							}
 						}
+						invalidateCommittedTranscript(this.renderer);
 					},
 					onAutoResizeImagesChange: (enabled) => {
 						this.settingsManager.setImageAutoResize(enabled);
@@ -4873,7 +4938,9 @@ export class InteractiveMode {
 					},
 					onMermaidRenderingModeChange: (mode) => {
 						this.settingsManager.setMermaidRenderingMode(mode);
+						this.committedTranscript.invalidate();
 						this.chatContainer.invalidate();
+						invalidateCommittedTranscript(this.renderer);
 						this.ui.requestRender();
 					},
 					onShowCacheMissNoticesChange: (shown) => {
@@ -4913,18 +4980,21 @@ export class InteractiveMode {
 						this.settingsManager.setOutputPad(padding);
 						this.outputPad = padding;
 						if (this.streamingComponent || this.session.isStreaming) {
-							for (const child of this.chatContainer.children) {
-								if (
-									child instanceof AssistantMessageComponent ||
-									child instanceof CustomMessageComponent ||
-									child instanceof UserMessageComponent
-								) {
-									child.setOutputPad(padding);
+							for (const container of [this.committedTranscript, this.chatContainer]) {
+								for (const child of container?.children ?? []) {
+									if (
+										child instanceof AssistantMessageComponent ||
+										child instanceof CustomMessageComponent ||
+										child instanceof UserMessageComponent
+									) {
+										child.setOutputPad(padding);
+									}
 								}
 							}
 							if (this.streamingComponent) {
 								this.streamingComponent.setOutputPad(padding);
 							}
+							invalidateCommittedTranscript(this.renderer);
 							this.ui.requestRender();
 							return;
 						}
@@ -5504,7 +5574,7 @@ export class InteractiveMode {
 						}
 
 						// Update UI
-						this.chatContainer.clear();
+						this.resetTranscriptContainers();
 						this.renderInitialMessages();
 						if (result.editorText && !this.editor.getText().trim()) {
 							this.editor.setText(result.editorText);
