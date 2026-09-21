@@ -18,6 +18,7 @@ import {
 	type ScrollbarGeometry,
 } from "./layout.ts";
 import { getLayoutNode } from "./layout-node.ts";
+import { BoundedTerminalWriter } from "./output-writer.ts";
 import type { Terminal } from "./terminal.ts";
 import {
 	deleteAllKittyImages,
@@ -1694,19 +1695,20 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 				? this.prepareKittyScreen(screen)
 				: { lines: screen, evictedImageDeletion: "" };
 
-		let buffer = BEGIN_SYNCHRONIZED_OUTPUT;
+		const output = new BoundedTerminalWriter((data) => this.terminal.write(data));
+		output.append(BEGIN_SYNCHRONIZED_OUTPUT);
 		if (fullRedraw) {
 			this.fullRedrawCount += 1;
 			const clearImages =
 				this.imageProtocol === "kitty" && hadUploadedKittyImages
 					? deleteAllKittyPlacements()
 					: this.deleteKittyImages();
-			buffer += `${clearImages}\x1b[2J`;
+			output.append(`${clearImages}\x1b[2J`);
 		} else if (imagesNeedRedraw) {
-			if (this.imageProtocol === "iterm2") buffer += "\x1b[2J";
-			else if (this.imageProtocol === "kitty") buffer += deleteAllKittyPlacements();
+			if (this.imageProtocol === "iterm2") output.append("\x1b[2J");
+			else if (this.imageProtocol === "kitty") output.append(deleteAllKittyPlacements());
 		}
-		buffer += preparedKittyScreen.evictedImageDeletion;
+		output.append(preparedKittyScreen.evictedImageDeletion);
 
 		// WezTerm erases intersecting Kitty image cells when a later EL clears a covered row.
 		// Only separate clearing from drawing for WezTerm frames that place images; preserve the
@@ -1719,23 +1721,25 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		if (clearRowsBeforeKittyImages) {
 			for (let row = 0; row < height; row++) {
 				if (!fullRedraw && !imagesNeedRedraw && screen[row] === this.previousScreen[row]) continue;
-				buffer += `\x1b[${row + 1};1H\x1b[2K`;
+				output.append(`\x1b[${row + 1};1H\x1b[2K`);
 			}
 		}
 
 		for (let row = 0; row < height; row++) {
 			if (!fullRedraw && !imagesNeedRedraw && screen[row] === this.previousScreen[row]) continue;
-			buffer += `\x1b[${row + 1};1H${clearRowsBeforeKittyImages ? "" : "\x1b[2K"}${preparedKittyScreen.lines[row] ?? ""}`;
+			output.append(
+				`\x1b[${row + 1};1H${clearRowsBeforeKittyImages ? "" : "\x1b[2K"}${preparedKittyScreen.lines[row] ?? ""}`,
+			);
 		}
 
 		if (cursorPos) {
-			buffer += `\x1b[${cursorPos.row + 1};${Math.min(width, cursorPos.col) + 1}H`;
-			buffer += this.getShowHardwareCursor() ? "\x1b[?25h" : "\x1b[?25l";
+			output.append(`\x1b[${cursorPos.row + 1};${Math.min(width, cursorPos.col) + 1}H`);
+			output.append(this.getShowHardwareCursor() ? "\x1b[?25h" : "\x1b[?25l");
 		} else {
-			buffer += "\x1b[?25l";
+			output.append("\x1b[?25l");
 		}
-		buffer += END_SYNCHRONIZED_OUTPUT;
-		this.terminal.write(buffer);
+		output.append(END_SYNCHRONIZED_OUTPUT);
+		output.flush();
 
 		this.previousScreen = screen;
 		this.previousScreenWidth = width;

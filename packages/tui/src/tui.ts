@@ -462,6 +462,36 @@ export function isViewportTUI(tui: TUI): tui is ViewportTUI {
 	return (tui as Partial<ViewportTUI>)[VIEWPORT_TUI] === true;
 }
 
+/** Renderer snapshot used to preserve the main-screen document across renderer switches. */
+export interface TuiMainScreenRenderState {
+	previousLines: string[];
+	previousWidth: number;
+	previousHeight: number;
+	cursorRow: number;
+	hardwareCursorRow: number;
+	maxLinesRendered: number;
+	previousViewportTop: number;
+}
+
+export const COMMITTED_TUI = Symbol.for("@earendil-works/pi-tui/committed");
+
+/**
+ * Capability implemented by renderers that keep a committed (append-only) transcript prefix
+ * and can snapshot their document state. In regular mode the finalized transcript is committed
+ * so only the live tail is re-rendered, leaving terminal scrollback untouched.
+ */
+export interface CommittedTUI extends TUI {
+	readonly [COMMITTED_TUI]: true;
+	setCommittedComponent(component: Component | undefined): void;
+	invalidateCommitted(): void;
+	captureRenderState(): TuiMainScreenRenderState;
+	restoreRenderState(state: TuiMainScreenRenderState): void;
+}
+
+export function isCommittedTUI(tui: TUI): tui is CommittedTUI {
+	return (tui as Partial<CommittedTUI>)[COMMITTED_TUI] === true;
+}
+
 export abstract class TuiBase extends Container implements TUI {
 	abstract readonly mode: TuiMode;
 	public terminal: Terminal;

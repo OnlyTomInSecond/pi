@@ -118,11 +118,14 @@ export {
 	type TerminalCapabilities,
 } from "./terminal-image.ts";
 export {
+	COMMITTED_TUI,
+	type CommittedTUI,
 	type Component,
 	Container,
 	CURSOR_MARKER,
 	compositeTuiLine,
 	type Focusable,
+	isCommittedTUI,
 	isFocusable,
 	isViewportTUI,
 	type OverlayAnchor,
@@ -135,6 +138,7 @@ export {
 	type TUI,
 	type TuiInputListener,
 	type TuiInputListenerResult,
+	type TuiMainScreenRenderState,
 	type TuiMode,
 	type TuiMouseButton,
 	type TuiMouseEvent,
@@ -144,7 +148,7 @@ export {
 	type ViewportTUI,
 } from "./tui.ts";
 export { TuiAltScreen, type TuiAltScreenOptions } from "./tui-alt-screen.ts";
-export { TuiMainScreen, type TuiMainScreenRenderState } from "./tui-main-screen.ts";
+export { TuiMainScreen } from "./tui-main-screen.ts";
 // Utilities
 export {
 	getOsc8LinkAtColumn,

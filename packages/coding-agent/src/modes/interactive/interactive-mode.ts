@@ -37,6 +37,7 @@ import {
 	fuzzyFilter,
 	getCapabilities,
 	hyperlink,
+	isCommittedTUI,
 	Markdown,
 	matchesKey,
 	Spacer,
@@ -47,7 +48,7 @@ import {
 	TruncatedText,
 	type TUI,
 	TuiAltScreen,
-	TuiMainScreen,
+	type TuiMainScreen,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
 import chalk from "chalk";
@@ -414,7 +415,7 @@ export interface InteractiveModeOptions {
 
 /** Invalidate the main-screen committed transcript prefix after its components change. */
 function invalidateCommittedTranscript(renderer: TuiMainScreen | TuiAltScreen | undefined): void {
-	if (renderer instanceof TuiMainScreen) renderer.invalidateCommitted();
+	if (renderer && isCommittedTUI(renderer)) renderer.invalidateCommitted();
 }
 
 export class InteractiveMode {
@@ -846,7 +847,7 @@ export class InteractiveMode {
 	 * document is mounted and scrolled by the layout root.
 	 */
 	private interactiveTuiComponents(tui: TuiMainScreen | TuiAltScreen): readonly Component[] {
-		if (tui instanceof TuiMainScreen) {
+		if (isCommittedTUI(tui)) {
 			tui.setCommittedComponent(this.committedTranscript);
 			return [
 				this.chatContainer,
@@ -905,7 +906,7 @@ export class InteractiveMode {
 		const showHardwareCursor = previousUi.getShowHardwareCursor();
 		const clearOnShrink = previousUi.getClearOnShrink();
 		const onDebug = previousUi.onDebug;
-		if (previousUi instanceof TuiMainScreen) {
+		if (isCommittedTUI(previousUi)) {
 			this.mainScreenRenderState = previousUi.captureRenderState();
 		}
 
@@ -924,7 +925,7 @@ export class InteractiveMode {
 		});
 		nextUi.setClearOnShrink(clearOnShrink);
 		nextUi.onDebug = onDebug;
-		if (nextUi instanceof TuiMainScreen && this.mainScreenRenderState) {
+		if (isCommittedTUI(nextUi) && this.mainScreenRenderState) {
 			nextUi.restoreRenderState(this.mainScreenRenderState);
 		}
 		this.renderer = nextUi;
