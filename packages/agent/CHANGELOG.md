@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.87.0] - 2026-09-21
+
 ### Breaking Changes
 
 - Removed `AgentOptions.shouldStopAfterTurn` and `AgentLoopConfig.shouldStopAfterTurn`. Use `finishTurn` and return `{ action: "end" }` to stop after the completed turn:

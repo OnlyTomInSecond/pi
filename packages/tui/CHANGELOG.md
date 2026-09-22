@@ -8,6 +8,8 @@
 - Added a committed transcript prefix to the main-screen renderer: finalized history is rendered and cached once per width, so steady frames only render and diff the live tail.
 - Kept the main-screen viewport stable while reading scrollback: the hidden hardware cursor is no longer repositioned every frame, and live changes that scrolled above the viewport repaint from the viewport top instead of clearing scrollback and replaying the transcript.
 
+## [0.87.0] - 2026-09-21
+
 ## [0.86.1] - 2026-09-20
 
 ## [0.86.0] - 2026-09-19

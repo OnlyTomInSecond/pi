@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Changed the default xAI model to Grok 4.7.
+
+### Fixed
+
+- Fixed missing or invalid `--mode` values being silently ignored instead of reporting an error and exiting with a nonzero status ([#9045](https://github.com/earendil-works/pi/issues/9045)).
+
+## [0.87.0] - 2026-09-21
+
 ### New Features
 
 - **Canonical session context and extension boundaries** — Edit model context without rewriting history and add actionable lifecycle hooks. See [ContextEditEntry](docs/session-format.md#contexteditentry) and [extension events](docs/extensions.md#extension-events).
