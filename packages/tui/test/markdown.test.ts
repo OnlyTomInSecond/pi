@@ -65,6 +65,69 @@ describe("Markdown component", () => {
 		});
 	});
 
+	describe("Incremental rendering", () => {
+		function countingTheme(): { theme: MarkdownTheme; borderCalls: () => number } {
+			let borderCalls = 0;
+			return {
+				theme: {
+					...defaultMarkdownTheme,
+					codeBlockBorder: (text: string) => {
+						borderCalls++;
+						return defaultMarkdownTheme.codeBlockBorder(text);
+					},
+				},
+				borderCalls: () => borderCalls,
+			};
+		}
+
+		it("reuses completed blocks when streamed source is appended", () => {
+			const { theme, borderCalls } = countingTheme();
+			const markdown = new Markdown("head\n\n```ts\nconst a = 1;\n```", 0, 0, theme, undefined, {
+				incremental: true,
+			});
+			markdown.render(80);
+			// One append makes the code block stop being the last token; after that it is stable.
+			markdown.setText("head\n\n```ts\nconst a = 1;\n```\n\ntail one");
+			markdown.render(80);
+			const bordersAfterCodeBlock = borderCalls();
+
+			const grown = "head\n\n```ts\nconst a = 1;\n```\n\ntail one\n\ntail two\n";
+			markdown.setText(grown);
+			const lines = markdown.render(80);
+
+			assert.strictEqual(borderCalls(), bordersAfterCodeBlock);
+			assert.deepStrictEqual(
+				lines,
+				new Markdown(grown, 0, 0, defaultMarkdownTheme, undefined, { incremental: true }).render(80),
+			);
+		});
+
+		it("matches a full render at every streaming step", () => {
+			const source = "# Title\n\nfirst paragraph\n\n```ts\nconst a = 1;\n```\n\nlast paragraph grows";
+			const markdown = new Markdown("", 0, 0, defaultMarkdownTheme, undefined, { incremental: true });
+
+			for (let end = 1; end <= source.length; end++) {
+				const prefix = source.slice(0, end);
+				markdown.setText(prefix);
+				assert.deepStrictEqual(markdown.render(80), new Markdown(prefix, 0, 0, defaultMarkdownTheme).render(80));
+			}
+		});
+
+		it("rebuilds the memo when the render width changes", () => {
+			const { theme, borderCalls } = countingTheme();
+			const source = "paragraph one\n\n```ts\nconst a = 1;\n```";
+			const markdown = new Markdown(source, 0, 0, theme, undefined, { incremental: true });
+			markdown.render(80);
+			const bordersAtEighty = borderCalls();
+
+			markdown.setText(`${source} and more text`);
+			const lines = markdown.render(60);
+
+			assert.notStrictEqual(borderCalls(), bordersAtEighty);
+			assert.deepStrictEqual(lines, new Markdown(`${source} and more text`, 0, 0, defaultMarkdownTheme).render(60));
+		});
+	});
+
 	describe("Lists", () => {
 		it("should render simple nested list", () => {
 			const markdown = new Markdown(

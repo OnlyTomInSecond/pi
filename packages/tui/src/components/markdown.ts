@@ -226,6 +226,12 @@ export interface MarkdownOptions {
 	transform?: (markdown: string, availableWidth: number) => string;
 	/** Render supported LaTeX math expressions as Unicode text (default: true). */
 	renderLatex?: boolean;
+	/**
+	 * Reuse the rendered lines of top-level blocks whose source did not change. Streaming appends
+	 * to the source, so this keeps only the growing tail expensive to render instead of re-rendering
+	 * every block on each update. Intended for a component that is updated in place while streaming.
+	 */
+	incremental?: boolean;
 }
 
 interface InlineStyleContext {
@@ -250,6 +256,12 @@ export class Markdown implements Component {
 	// about ten times the size of its source, and every message of a long transcript keeps a Markdown component. The
 	// tokens survive a burst of re-renders, such as a theme preview, and are collected afterwards.
 	private cachedTokens?: WeakRef<{ source: string; tokens: Token[] }>;
+	// Rendered lines per top-level token while streaming. Entries are matched by source text, so
+	// appending to the source only re-renders the tokens whose text changed.
+	private cachedTokenLines?: {
+		width: number;
+		entries: Array<{ raw: string; nextType: string | undefined; lines: string[] }>;
+	};
 
 	constructor(
 		text: string,
@@ -268,14 +280,22 @@ export class Markdown implements Component {
 	}
 
 	setText(text: string): void {
+		if (text === this.text) {
+			return;
+		}
 		this.text = text;
-		this.invalidate();
+		// Keep the per-token memo: streaming changes only the trailing blocks, which the memo skips.
+		this.cachedText = undefined;
+		this.cachedWidth = undefined;
+		this.cachedLines = undefined;
 	}
 
 	invalidate(): void {
 		this.cachedText = undefined;
 		this.cachedWidth = undefined;
 		this.cachedLines = undefined;
+		// Rendered token lines depend on the theme and default style, which invalidate() resets.
+		this.cachedTokenLines = undefined;
 	}
 
 	render(width: number): string[] {
@@ -310,52 +330,56 @@ export class Markdown implements Component {
 			this.cachedTokens = new WeakRef({ source: normalizedText, tokens });
 		}
 
-		// Convert tokens to styled terminal output
-		const renderedLines: string[] = [];
-
-		for (let i = 0; i < tokens.length; i++) {
-			const token = tokens[i];
-			const nextToken = tokens[i + 1];
-			const tokenLines = this.renderToken(token, contentWidth, nextToken?.type);
-			for (const tokenLine of tokenLines) {
-				renderedLines.push(tokenLine);
-			}
-		}
-
-		// Wrap lines (NO padding, NO background yet)
-		const wrappedLines: string[] = [];
-		for (const line of renderedLines) {
-			if (isImageLine(line)) {
-				wrappedLines.push(line);
-			} else {
-				for (const wrappedLine of wrapTextWithAnsi(line, contentWidth)) {
-					wrappedLines.push(wrappedLine);
-				}
-			}
-		}
-
-		// Add margins and background to each wrapped line
+		// Convert tokens into fully styled, wrapped, and padded lines. While incremental, reuse the
+		// final lines of blocks whose source is unchanged so only the growing tail is re-rendered.
+		const incremental = this.options.incremental === true;
+		const reusableTokens =
+			incremental && this.cachedTokenLines?.width === width ? this.cachedTokenLines.entries : undefined;
+		const nextTokenLines = incremental
+			? ([] as Array<{ raw: string; nextType: string | undefined; lines: string[] }>)
+			: undefined;
+		const contentLines: string[] = [];
 		const leftMargin = " ".repeat(this.paddingX);
 		const rightMargin = " ".repeat(this.paddingX);
 		const bgFn = this.defaultTextStyle?.bgColor;
-		const contentLines: string[] = [];
 
-		for (const line of wrappedLines) {
-			if (isImageLine(line)) {
-				contentLines.push(line);
+		for (let i = 0; i < tokens.length; i++) {
+			const token = tokens[i];
+			const nextTokenType = tokens[i + 1]?.type;
+			const previous = reusableTokens?.[i];
+			if (nextTokenLines && previous?.raw === token.raw && previous.nextType === nextTokenType) {
+				nextTokenLines.push(previous);
+				for (const line of previous.lines) {
+					contentLines.push(line);
+				}
 				continue;
 			}
 
-			const lineWithMargins = leftMargin + line + rightMargin;
-
-			if (bgFn) {
-				contentLines.push(applyBackgroundToLine(lineWithMargins, width, bgFn));
-			} else {
-				// No background - just pad to width
-				const visibleLen = visibleWidth(lineWithMargins);
-				const paddingNeeded = Math.max(0, width - visibleLen);
-				contentLines.push(lineWithMargins + " ".repeat(paddingNeeded));
+			const tokenLines: string[] = [];
+			for (const line of this.renderToken(token, contentWidth, nextTokenType)) {
+				if (isImageLine(line)) {
+					tokenLines.push(line);
+					continue;
+				}
+				for (const wrappedLine of wrapTextWithAnsi(line, contentWidth)) {
+					const lineWithMargins = leftMargin + wrappedLine + rightMargin;
+					if (bgFn) {
+						tokenLines.push(applyBackgroundToLine(lineWithMargins, width, bgFn));
+					} else {
+						const paddingNeeded = Math.max(0, width - visibleWidth(lineWithMargins));
+						tokenLines.push(lineWithMargins + " ".repeat(paddingNeeded));
+					}
+				}
 			}
+			flattenLines(tokenLines);
+			nextTokenLines?.push({ raw: token.raw, nextType: nextTokenType, lines: tokenLines });
+			for (const line of tokenLines) {
+				contentLines.push(line);
+			}
+		}
+
+		if (nextTokenLines) {
+			this.cachedTokenLines = { width, entries: nextTokenLines };
 		}
 
 		// Add top/bottom padding (empty lines)
@@ -368,7 +392,6 @@ export class Markdown implements Component {
 
 		// Combine top padding, content, and bottom padding
 		const result = emptyLines.concat(contentLines, emptyLines);
-		flattenLines(result);
 
 		// Update cache
 		this.cachedText = this.text;
