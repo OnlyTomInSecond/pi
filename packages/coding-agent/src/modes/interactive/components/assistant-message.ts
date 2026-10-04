@@ -28,6 +28,16 @@ export class AssistantMessageComponent extends Container {
 	 * collapses a burst of deltas into one content rebuild per rendered frame.
 	 */
 	private pendingStreamingMessage?: AssistantMessage;
+	/**
+	 * Markdown components reused across frames, keyed by the content index that produces them, so a
+	 * streamed block keeps its incremental render memo. Finalized messages get fresh components, so
+	 * the memo is scoped to the streaming lifetime (see {@link appliedIsStreaming}).
+	 */
+	private textMarkdowns = new Map<number, Markdown>();
+	private thinkingMarkdowns = new Map<number, Markdown>();
+	/** Rendering inputs captured by the reused Markdown components; rebuild them when these change. */
+	private appliedIsStreaming?: boolean;
+	private appliedOutputPad?: number;
 
 	constructor(
 		message?: AssistantMessage,
@@ -115,6 +125,15 @@ export class AssistantMessageComponent extends Container {
 	updateContent(message: AssistantMessage, isStreaming = this.isStreaming): void {
 		this.pendingStreamingMessage = undefined;
 		this.lastMessage = message;
+
+		// Markdown components capture the streaming flag and padding, so rebuild them when either
+		// changes. Streaming toggles once per message, so this discards the memo for finalized text.
+		if (this.appliedIsStreaming !== isStreaming || this.appliedOutputPad !== this.outputPad) {
+			this.textMarkdowns.clear();
+			this.thinkingMarkdowns.clear();
+			this.appliedIsStreaming = isStreaming;
+			this.appliedOutputPad = this.outputPad;
+		}
 		this.isStreaming = isStreaming;
 
 		// Clear content container
@@ -135,12 +154,9 @@ export class AssistantMessageComponent extends Container {
 			if (content.type === "text" && content.text.trim()) {
 				// Assistant text messages with no background - trim the text
 				// Set paddingY=0 to avoid extra spacing before tool executions
-				this.contentContainer.addChild(
-					new Markdown(content.text.trim(), this.outputPad, 0, this.markdownTheme, undefined, {
-						transform: createMarkdownTransform("assistant", this.isStreaming, this.markdownTransformers),
-					}),
-				);
+				this.contentContainer.addChild(this.getTextMarkdown(i, content.text.trim()));
 			} else if (content.type === "thinking") {
+				const runStart = i;
 				const thinkingBlocks: string[] = [];
 				for (; i < message.content.length; i++) {
 					const thinkingContent = message.content[i];
@@ -168,23 +184,7 @@ export class AssistantMessageComponent extends Container {
 				const hidden = this.thinkingVisibilityOverrides.get(runIndex) ?? this.hideThinkingBlock;
 				const thinkingComponent = hidden
 					? new Text(theme.italic(theme.fg("thinkingText", this.hiddenThinkingLabel)), this.outputPad, 0)
-					: new Markdown(
-							thinkingBlocks.join("\n\n"),
-							this.outputPad,
-							0,
-							this.markdownTheme,
-							{
-								color: (text: string) => theme.fg("thinkingText", text),
-								italic: true,
-							},
-							{
-								transform: createMarkdownTransform(
-									"assistant-thinking",
-									this.isStreaming,
-									this.markdownTransformers,
-								),
-							},
-						);
+					: this.getThinkingMarkdown(runStart, thinkingBlocks.join("\n\n"));
 				this.contentContainer.addChild(
 					new MouseRegion(thinkingComponent, (event) => {
 						if (event.type !== "click" || event.button !== "left") return undefined;
@@ -224,5 +224,48 @@ export class AssistantMessageComponent extends Container {
 				this.contentContainer.addChild(new Text(theme.fg("error", `Error: ${errorMsg}`), this.outputPad, 0));
 			}
 		}
+	}
+
+	/**
+	 * Return the Markdown for a text block, reusing the component across streaming frames so its
+	 * incremental render memo survives. Reuse is limited to the streaming lifetime; finalized
+	 * messages get fresh components because they do not need the memo.
+	 */
+	private getTextMarkdown(index: number, text: string): Markdown {
+		const existing = this.textMarkdowns.get(index);
+		if (existing) {
+			existing.setText(text);
+			return existing;
+		}
+		const markdown = new Markdown(text, this.outputPad, 0, this.markdownTheme, undefined, {
+			transform: createMarkdownTransform("assistant", this.isStreaming, this.markdownTransformers),
+			incremental: this.isStreaming,
+		});
+		this.textMarkdowns.set(index, markdown);
+		return markdown;
+	}
+
+	private getThinkingMarkdown(index: number, text: string): Markdown {
+		const existing = this.thinkingMarkdowns.get(index);
+		if (existing) {
+			existing.setText(text);
+			return existing;
+		}
+		const markdown = new Markdown(
+			text,
+			this.outputPad,
+			0,
+			this.markdownTheme,
+			{
+				color: (value: string) => theme.fg("thinkingText", value),
+				italic: true,
+			},
+			{
+				transform: createMarkdownTransform("assistant-thinking", this.isStreaming, this.markdownTransformers),
+				incremental: this.isStreaming,
+			},
+		);
+		this.thinkingMarkdowns.set(index, markdown);
+		return markdown;
 	}
 }
