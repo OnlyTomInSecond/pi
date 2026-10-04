@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { MarkdownTransformContext } from "../src/core/extensions/types.ts";
 import type { MermaidRenderingMode } from "../src/core/settings-manager.ts";
-import { createMermaidMarkdownTransformer } from "../src/modes/interactive/components/mermaid.ts";
+import {
+	createMermaidMarkdownTransformer,
+	mayContainMermaidBlock,
+} from "../src/modes/interactive/components/mermaid.ts";
 import type { Theme } from "../src/modes/interactive/theme/theme.ts";
 
 interface TransformOptions {
@@ -104,5 +107,20 @@ describe("Mermaid rendering", () => {
 		expect(transformMermaid(markdown, { mode: "final", isStreaming: true })).toBe(markdown);
 		expect(transformMermaid(markdown, { mode: "final" })).not.toContain("```mermaid");
 		expect(transformMermaid(markdown, { messageType: "assistant-thinking" })).toBe(markdown);
+	});
+
+	it("detects whether a Mermaid block is possible without parsing", () => {
+		expect(mayContainMermaidBlock("plain text")).toBe(false);
+		expect(mayContainMermaidBlock("```ts\nconst x = 1;\n```")).toBe(false);
+		expect(mayContainMermaidBlock("see mermaid docs")).toBe(true);
+		expect(mayContainMermaidBlock("```mermaid\nflowchart LR\n  A --> B\n```")).toBe(true);
+		expect(mayContainMermaidBlock("```Mermaid\nflowchart LR\n  A --> B\n```")).toBe(true);
+	});
+
+	it("returns Markdown without a Mermaid block unchanged", () => {
+		const markdown = "Before\n\n```ts\nconst x = 1;\n```\n\nAfter";
+
+		expect(transformMermaid(markdown, { isStreaming: true })).toBe(markdown);
+		expect(transformMermaid(markdown, { isStreaming: false })).toBe(markdown);
 	});
 });

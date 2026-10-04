@@ -56,6 +56,19 @@ function themedLines(art: MermaidArt, theme: Theme): string[] {
 	return art.styled.map((row) => row.map((span) => styleSpan(span, theme)).join(""));
 }
 
+/**
+ * A Mermaid block requires the literal language name in a code-fence info string, so a source that
+ * does not contain it cannot produce one. The transformer runs on the whole message for every
+ * streaming frame, and lexing it only to find no diagrams roughly doubles the render cost.
+ * Match case-insensitively because `isMermaid` lowercases the info string before comparing.
+ */
+const MERMAID_LANGUAGE_HINT = /mermaid/i;
+
+/** Cheap superset check that lets the transformer skip its full Markdown parse. */
+export function mayContainMermaidBlock(markdown: string): boolean {
+	return MERMAID_LANGUAGE_HINT.test(markdown);
+}
+
 /** Create a transformer that replaces top-level Mermaid code blocks with Unicode terminal diagrams. */
 export function createMermaidMarkdownTransformer(options: MermaidTransformerOptions): MarkdownTransformer {
 	return (markdown, context) => {
@@ -65,6 +78,10 @@ export function createMermaidMarkdownTransformer(options: MermaidTransformerOpti
 			context.messageType === "assistant-thinking" ||
 			(context.isStreaming && mode !== "streaming")
 		) {
+			return markdown;
+		}
+
+		if (!mayContainMermaidBlock(markdown)) {
 			return markdown;
 		}
 
