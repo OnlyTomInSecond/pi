@@ -274,4 +274,35 @@ describe("AssistantMessageComponent", () => {
 		const unpaddedLines = unpaddedComponent.render(40).map((line) => stripAnsi(line));
 		expect(unpaddedLines.some((line) => line.startsWith("hello"))).toBe(true);
 	});
+
+	test("defers streaming updates until render and applies only the latest frame", () => {
+		initTheme("dark");
+		const transformed: string[] = [];
+		const component = new AssistantMessageComponent(undefined, false, undefined, "Thinking...", 1, [
+			(markdown) => {
+				transformed.push(markdown);
+				return markdown;
+			},
+		]);
+
+		component.updateStreamingContent(createAssistantMessage([{ type: "text", text: "first" }]));
+		component.updateStreamingContent(createAssistantMessage([{ type: "text", text: "second" }]));
+		expect(transformed).toEqual([]);
+
+		const rendered = stripAnsi(component.render(80).join("\n"));
+		expect(rendered).toContain("second");
+		expect(transformed).toEqual(["second"]);
+	});
+
+	test("applies a final update immediately and discards a pending streaming frame", () => {
+		initTheme("dark");
+		const component = new AssistantMessageComponent();
+
+		component.updateStreamingContent(createAssistantMessage([{ type: "text", text: "partial" }]));
+		component.updateContent(createAssistantMessage([{ type: "text", text: "final" }]), false);
+
+		const rendered = stripAnsi(component.render(80).join("\n"));
+		expect(rendered).toContain("final");
+		expect(rendered).not.toContain("partial");
+	});
 });

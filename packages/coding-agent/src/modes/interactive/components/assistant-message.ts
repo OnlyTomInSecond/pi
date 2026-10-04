@@ -22,6 +22,12 @@ export class AssistantMessageComponent extends Container {
 	private hasToolCalls = false;
 	private isStreaming = false;
 	private thinkingVisibilityOverrides = new Map<number, boolean>();
+	/**
+	 * Latest streaming frame when it has not been rendered yet. Provider deltas arrive far more
+	 * often than the TUI renders, so frames are queued here and applied in {@link render}, which
+	 * collapses a burst of deltas into one content rebuild per rendered frame.
+	 */
+	private pendingStreamingMessage?: AssistantMessage;
 
 	constructor(
 		message?: AssistantMessage,
@@ -50,6 +56,7 @@ export class AssistantMessageComponent extends Container {
 
 	override invalidate(): void {
 		super.invalidate();
+		this.flushPendingContent();
 		if (this.lastMessage) {
 			this.updateContent(this.lastMessage);
 		}
@@ -58,6 +65,7 @@ export class AssistantMessageComponent extends Container {
 	setHideThinkingBlock(hide: boolean): void {
 		this.hideThinkingBlock = hide;
 		this.thinkingVisibilityOverrides.clear();
+		this.flushPendingContent();
 		if (this.lastMessage) {
 			this.updateContent(this.lastMessage);
 		}
@@ -65,6 +73,7 @@ export class AssistantMessageComponent extends Container {
 
 	setHiddenThinkingLabel(label: string): void {
 		this.hiddenThinkingLabel = label;
+		this.flushPendingContent();
 		if (this.lastMessage) {
 			this.updateContent(this.lastMessage);
 		}
@@ -72,12 +81,14 @@ export class AssistantMessageComponent extends Container {
 
 	setOutputPad(padding: number): void {
 		this.outputPad = padding;
+		this.flushPendingContent();
 		if (this.lastMessage) {
 			this.updateContent(this.lastMessage);
 		}
 	}
 
 	override render(width: number): string[] {
+		this.flushPendingContent();
 		const lines = super.render(width);
 		if (this.hasToolCalls || lines.length === 0) {
 			return lines;
@@ -88,7 +99,21 @@ export class AssistantMessageComponent extends Container {
 		return lines;
 	}
 
+	/** Queue the latest streaming frame. It is applied by the next {@link render}. */
+	updateStreamingContent(message: AssistantMessage): void {
+		this.pendingStreamingMessage = message;
+	}
+
+	private flushPendingContent(): void {
+		const message = this.pendingStreamingMessage;
+		if (!message) {
+			return;
+		}
+		this.updateContent(message, true);
+	}
+
 	updateContent(message: AssistantMessage, isStreaming = this.isStreaming): void {
+		this.pendingStreamingMessage = undefined;
 		this.lastMessage = message;
 		this.isStreaming = isStreaming;
 
@@ -164,6 +189,7 @@ export class AssistantMessageComponent extends Container {
 					new MouseRegion(thinkingComponent, (event) => {
 						if (event.type !== "click" || event.button !== "left") return undefined;
 						this.thinkingVisibilityOverrides.set(runIndex, !hidden);
+						this.flushPendingContent();
 						if (this.lastMessage) this.updateContent(this.lastMessage);
 						return { handled: true };
 					}),
