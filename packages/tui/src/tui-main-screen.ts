@@ -105,7 +105,7 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 		if (!this.committedDirty && this.committedWidth === width) {
 			return this.committedLines;
 		}
-		this.committedLines = this.committedComponent.render(width);
+		this.committedLines = this.resolveFakeCursors(this.committedComponent.render(width));
 		this.committedWidth = width;
 		this.committedDirty = false;
 		this.committedJustRendered = true;
@@ -281,9 +281,10 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 
 		// Render the committed prefix (cached) and the live tail separately. Only the tail is
 		// re-rendered every frame; the prefix is re-rendered on width change or invalidation.
+		// Fake cursors are resolved before compositing so overlays and line slicing see plain SGR codes.
 		let head = this.renderCommitted(width);
 		const committedRefreshed = this.committedJustRendered;
-		let tail = this.render(width);
+		let tail = this.resolveFakeCursors(this.render(width));
 
 		// Composite overlays into the rendered lines (before differential compare)
 		if (this.hasOverlayEntries) {
