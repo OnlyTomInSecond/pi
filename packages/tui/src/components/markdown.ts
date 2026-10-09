@@ -168,6 +168,31 @@ function trimPartialClosingFences(tokens: readonly Token[]): void {
 	token.text = token.text.slice(0, -lastLine.length).replace(/\n$/, "");
 }
 
+const FENCED_CODE_START = /^ {0,3}(`{3,}|~{3,})/;
+const FENCE_LINE = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
+
+/**
+ * Whether a fenced code block has not received its closing fence yet. marked consumes the closing
+ * fence into the token's source, so a block that is still growing runs to the end of the source.
+ */
+function hasUnterminatedFence(token: Token): boolean {
+	if (token.type !== "code") {
+		return false;
+	}
+	const opening = FENCED_CODE_START.exec(token.raw)?.[1];
+	if (!opening) {
+		return false;
+	}
+	const trimmed = token.raw.replace(/\n+$/, "");
+	const lastLineStart = trimmed.lastIndexOf("\n");
+	// A single line is only the opening fence, so the block still waits for its content.
+	if (lastLineStart === -1) {
+		return true;
+	}
+	const closing = FENCE_LINE.exec(trimmed.slice(lastLineStart + 1))?.[1];
+	return closing === undefined || closing[0] !== opening[0] || closing.length < opening.length;
+}
+
 const markdownParser = new Marked();
 markdownParser.setOptions({
 	tokenizer: new StrictStrikethroughTokenizer(),
@@ -670,8 +695,12 @@ export class Markdown implements Component {
 
 			case "code": {
 				const indent = this.theme.codeBlockIndent ?? "  ";
+				// While streaming, a block whose closing fence has not arrived keeps growing, and the
+				// highlighter would run over the whole block again on every update. Style it plainly until the
+				// block is complete, then highlight it once; the block memo keeps the result afterwards.
+				const deferred = this.options.incremental === true && hasUnterminatedFence(token);
 				lines.push(this.theme.codeBlockBorder(`\`\`\`${token.lang || ""}`));
-				if (this.theme.highlightCode) {
+				if (this.theme.highlightCode && !deferred) {
 					const highlightedLines = this.theme.highlightCode(token.text, token.lang);
 					for (const hlLine of highlightedLines) {
 						lines.push(`${indent}${hlLine}`);

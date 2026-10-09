@@ -168,6 +168,41 @@ describe("Markdown component", () => {
 			assert.notStrictEqual(borderCalls(), bordersAtEighty);
 			assert.deepStrictEqual(lines, new Markdown(`${source} and more text`, 0, 0, defaultMarkdownTheme).render(60));
 		});
+
+		it("highlights a streamed code block once, when its closing fence arrives", () => {
+			let highlightCalls = 0;
+			const theme: MarkdownTheme = {
+				...defaultMarkdownTheme,
+				highlightCode: (code, lang) => {
+					highlightCalls++;
+					return defaultMarkdownTheme.highlightCode?.(code, lang) ?? code.split("\n");
+				},
+			};
+			const body = "const a = 1;\nconst b = 2;\nconst c = 3;\n";
+			const open = `\`\`\`ts\n${body}`;
+			const markdown = new Markdown("", 0, 0, theme, undefined, { incremental: true });
+
+			for (let end = 1; end <= open.length; end++) {
+				markdown.setText(open.slice(0, end));
+				markdown.render(80);
+			}
+			assert.strictEqual(highlightCalls, 0, "an open code block should render without highlighting");
+
+			const closed = `${open}\`\`\``;
+			markdown.setText(closed);
+			markdown.render(80);
+			assert.strictEqual(highlightCalls, 1, "the completed block should highlight once");
+
+			const grown = `${closed}\n\nafter\n`;
+			markdown.setText(grown);
+			markdown.render(80);
+			// The block left the trailing position, and the memo keeps it from then on.
+			markdown.setText(`${grown} and more`);
+			markdown.render(80);
+			assert.strictEqual(highlightCalls, 2);
+
+			assert.deepStrictEqual(markdown.render(80), new Markdown(`${grown} and more`, 0, 0, theme).render(80));
+		});
 	});
 
 	describe("Lists", () => {
