@@ -113,6 +113,33 @@ describe("Markdown component", () => {
 			}
 		});
 
+		it("matches a full render at every streaming step of representative sources", () => {
+			const sources = [
+				"intro\n\nparagraph two\n\n```ts\nconst a = 1;\n```\n\ntail",
+				"text with **bold** and `code`\n    indented code\n- list item",
+				"> quoted line\nplain continuation\n  indented\n--",
+				"- [x] done\n- [ ] todo\n  - nested\n\n- loose item",
+				"| a | b |\n| - | - |\n| 1 | 2 |\n\nafter",
+				"see [ref]\n\n[ref]: https://example.com\n\nmore",
+				"<div>block</div>\n\ninline <b>tag</b>\n\nafter",
+				"# head\n\nsetext\n=====\n\nlast\r\n\r\nend",
+			];
+			for (const source of sources) {
+				for (const width of [40, 80]) {
+					const markdown = new Markdown("", 0, 0, defaultMarkdownTheme, undefined, { incremental: true });
+					for (let end = 1; end <= source.length; end++) {
+						const prefix = source.slice(0, end);
+						markdown.setText(prefix);
+						assert.deepStrictEqual(
+							markdown.render(width),
+							new Markdown(prefix, 0, 0, defaultMarkdownTheme).render(width),
+							`width ${width}: ${JSON.stringify(prefix)}`,
+						);
+					}
+				}
+			}
+		});
+
 		it("rebuilds the memo when the render width changes", () => {
 			const { theme, borderCalls } = countingTheme();
 			const source = "paragraph one\n\n```ts\nconst a = 1;\n```";

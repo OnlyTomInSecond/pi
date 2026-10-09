@@ -239,6 +239,20 @@ interface InlineStyleContext {
 	stylePrefix: string;
 }
 
+/** Rendered lines of one top-level token, reused while its rendering inputs are unchanged. */
+interface RenderedTokenLines {
+	type: string;
+	raw: string;
+	text: string;
+	nextType: string | undefined;
+	lines: string[];
+}
+
+/** The tokenizer's own text for a token, which can change while its raw source stays the same. */
+function tokenText(token: Token): string {
+	return "text" in token && typeof token.text === "string" ? token.text : "";
+}
+
 export class Markdown implements Component {
 	private text: string;
 	private paddingX: number; // Left/right padding
@@ -256,12 +270,12 @@ export class Markdown implements Component {
 	// about ten times the size of its source, and every message of a long transcript keeps a Markdown component. The
 	// tokens survive a burst of re-renders, such as a theme preview, and are collected afterwards.
 	private cachedTokens?: WeakRef<{ source: string; tokens: Token[] }>;
-	// Rendered lines per top-level token while streaming. Entries are matched by source text, so
-	// appending to the source only re-renders the tokens whose text changed.
-	private cachedTokenLines?: {
-		width: number;
-		entries: Array<{ raw: string; nextType: string | undefined; lines: string[] }>;
-	};
+	// Reference definitions resolve links in blocks that were parsed before them, so a block's own
+	// source does not show whether its rendered lines are still valid.
+	private hasLinkDefinitions = false;
+	// Rendered lines per top-level token while streaming. Entries are matched by the token's source,
+	// type and text, so appending to the source only re-renders the tokens that changed.
+	private cachedTokenLines?: { width: number; entries: RenderedTokenLines[] };
 
 	constructor(
 		text: string,
@@ -325,19 +339,24 @@ export class Markdown implements Component {
 		const cached = this.cachedTokens?.deref();
 		let tokens = cached?.source === normalizedText ? cached.tokens : undefined;
 		if (!tokens) {
-			tokens = markdownParser.lexer(normalizedText);
-			trimPartialClosingFences(tokens);
+			const parsed = markdownParser.lexer(normalizedText);
+			trimPartialClosingFences(parsed);
+			tokens = parsed;
 			this.cachedTokens = new WeakRef({ source: normalizedText, tokens });
+			this.hasLinkDefinitions = Object.keys(parsed.links).length > 0;
 		}
 
 		// Convert tokens into fully styled, wrapped, and padded lines. While incremental, reuse the
 		// final lines of blocks whose source is unchanged so only the growing tail is re-rendered.
-		const incremental = this.options.incremental === true;
+		// Blocks parsed before a reference definition resolve their links through it, which their own
+		// source does not show, so nothing is reusable once the source defines links.
+		const incremental = this.options.incremental === true && !this.hasLinkDefinitions;
+		if (!incremental) {
+			this.cachedTokenLines = undefined;
+		}
 		const reusableTokens =
 			incremental && this.cachedTokenLines?.width === width ? this.cachedTokenLines.entries : undefined;
-		const nextTokenLines = incremental
-			? ([] as Array<{ raw: string; nextType: string | undefined; lines: string[] }>)
-			: undefined;
+		const nextTokenLines = incremental ? ([] as RenderedTokenLines[]) : undefined;
 		const contentLines: string[] = [];
 		const leftMargin = " ".repeat(this.paddingX);
 		const rightMargin = " ".repeat(this.paddingX);
@@ -346,8 +365,15 @@ export class Markdown implements Component {
 		for (let i = 0; i < tokens.length; i++) {
 			const token = tokens[i];
 			const nextTokenType = tokens[i + 1]?.type;
+			const text = tokenText(token);
 			const previous = reusableTokens?.[i];
-			if (nextTokenLines && previous?.raw === token.raw && previous.nextType === nextTokenType) {
+			if (
+				nextTokenLines &&
+				previous?.type === token.type &&
+				previous.raw === token.raw &&
+				previous.text === text &&
+				previous.nextType === nextTokenType
+			) {
 				nextTokenLines.push(previous);
 				for (const line of previous.lines) {
 					contentLines.push(line);
@@ -372,7 +398,7 @@ export class Markdown implements Component {
 				}
 			}
 			flattenLines(tokenLines);
-			nextTokenLines?.push({ raw: token.raw, nextType: nextTokenType, lines: tokenLines });
+			nextTokenLines?.push({ type: token.type, raw: token.raw, text, nextType: nextTokenType, lines: tokenLines });
 			for (const line of tokenLines) {
 				contentLines.push(line);
 			}
