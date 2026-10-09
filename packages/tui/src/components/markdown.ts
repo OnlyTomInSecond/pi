@@ -239,6 +239,27 @@ interface InlineStyleContext {
 	stylePrefix: string;
 }
 
+/**
+ * Number of trailing tokens that stay in the re-lexed tail. A tokenizer can match more once the
+ * source grows, and a single append can change the last two top-level tokens of a parse (a list that
+ * becomes a setext heading the block before it then absorbs, for example). One token of margin keeps
+ * the frozen prefix out of reach of the appended source.
+ */
+const STREAMED_TAIL_MARGIN = 3;
+
+/**
+ * Tokens of a streamed source plus the boundary that appending can no longer change. Everything
+ * before `frozenCount` is final, so the next parse only has to lex the rest of the source.
+ */
+interface StreamedTokens {
+	source: string;
+	tokens: Token[];
+	frozenCount: number;
+	frozenOffset: number;
+	/** The frozen prefix contains raw HTML, which can change how the tail's inline content parses. */
+	frozenHasHtml: boolean;
+}
+
 /** Rendered lines of one top-level token, reused while its rendering inputs are unchanged. */
 interface RenderedTokenLines {
 	type: string;
@@ -270,8 +291,12 @@ export class Markdown implements Component {
 	// about ten times the size of its source, and every message of a long transcript keeps a Markdown component. The
 	// tokens survive a burst of re-renders, such as a theme preview, and are collected afterwards.
 	private cachedTokens?: WeakRef<{ source: string; tokens: Token[] }>;
-	// Reference definitions resolve links in blocks that were parsed before them, so a block's own
-	// source does not show whether its rendered lines are still valid.
+	// Tokens of the last parse of a streamed source, with the boundary that appending cannot change.
+	// Held strongly: it only exists while a component is updated in place, and dropping it would turn
+	// every update back into a parse of the whole source.
+	private streamedTokens?: StreamedTokens;
+	// Reference definitions resolve links in blocks that were parsed before them, so a parse that
+	// defined links cannot be split, and its rendered lines are not reusable by block source alone.
 	private hasLinkDefinitions = false;
 	// Rendered lines per top-level token while streaming. Entries are matched by the token's source,
 	// type and text, so appending to the source only re-renders the tokens that changed.
@@ -312,6 +337,81 @@ export class Markdown implements Component {
 		this.cachedTokenLines = undefined;
 	}
 
+	/**
+	 * Parse the source, lexing only the tail when the last parse already covered a prefix of it.
+	 * Appending can only change the last token of the previous parse, so everything before it is kept.
+	 */
+	private lexTokens(source: string): Token[] {
+		const cached = this.cachedTokens?.deref();
+		if (cached?.source === source) {
+			return cached.tokens;
+		}
+
+		const streamed = this.streamedTokens;
+		if (streamed?.source === source) {
+			return streamed.tokens;
+		}
+
+		if (streamed && this.canReuseStreamedTokens(streamed, source)) {
+			const tail = markdownParser.lexer(source.slice(streamed.frozenOffset));
+			// A definition in the tail resolves references in the frozen prefix, which would keep stale
+			// inline tokens. Only newly defined links matter here, not references to them.
+			if (Object.keys(tail.links).length === 0) {
+				const tokens = streamed.tokens.slice(0, streamed.frozenCount);
+				for (const token of tail) {
+					tokens.push(token);
+				}
+				trimPartialClosingFences(tokens);
+				this.hasLinkDefinitions = false;
+				this.rememberStreamedTokens(source, tokens);
+				return tokens;
+			}
+		}
+
+		const parsed = markdownParser.lexer(source);
+		trimPartialClosingFences(parsed);
+		this.cachedTokens = new WeakRef({ source, tokens: parsed });
+		this.hasLinkDefinitions = Object.keys(parsed.links).length > 0;
+		this.rememberStreamedTokens(source, parsed);
+		return parsed;
+	}
+
+	/** Whether appending to the parsed source leaves its frozen prefix untouched. */
+	private canReuseStreamedTokens(streamed: StreamedTokens, source: string): boolean {
+		return (
+			!this.hasLinkDefinitions &&
+			!streamed.frozenHasHtml &&
+			!source.includes("\r") &&
+			source.length > streamed.source.length &&
+			source.startsWith(streamed.source)
+		);
+	}
+
+	/**
+	 * Record where the parsed tokens became final. Only the trailing tokens can change when the source
+	 * grows, so the rest of the parse is kept as the prefix for the next update.
+	 */
+	private rememberStreamedTokens(source: string, tokens: Token[]): void {
+		const frozenCount = Math.max(0, tokens.length - STREAMED_TAIL_MARGIN);
+		// Without an incremental consumer the cache would only retain tokens, and line endings would
+		// break the offsets because the lexer normalizes them.
+		if (this.options.incremental !== true || frozenCount < 1 || source.includes("\r")) {
+			this.streamedTokens = undefined;
+			return;
+		}
+		let frozenOffset = 0;
+		for (let i = 0; i < frozenCount; i++) {
+			frozenOffset += tokens[i].raw.length;
+		}
+		this.streamedTokens = {
+			source,
+			tokens,
+			frozenCount,
+			frozenOffset,
+			frozenHasHtml: source.slice(0, frozenOffset).includes("<"),
+		};
+	}
+
 	render(width: number): string[] {
 		// Check cache
 		if (this.cachedLines && this.cachedText === this.text && this.cachedWidth === width) {
@@ -336,15 +436,7 @@ export class Markdown implements Component {
 		const normalizedText = text.replace(/\t/g, "   ");
 
 		// Parse markdown to HTML-like tokens
-		const cached = this.cachedTokens?.deref();
-		let tokens = cached?.source === normalizedText ? cached.tokens : undefined;
-		if (!tokens) {
-			const parsed = markdownParser.lexer(normalizedText);
-			trimPartialClosingFences(parsed);
-			tokens = parsed;
-			this.cachedTokens = new WeakRef({ source: normalizedText, tokens });
-			this.hasLinkDefinitions = Object.keys(parsed.links).length > 0;
-		}
+		const tokens = this.lexTokens(normalizedText);
 
 		// Convert tokens into fully styled, wrapped, and padded lines. While incremental, reuse the
 		// final lines of blocks whose source is unchanged so only the growing tail is re-rendered.

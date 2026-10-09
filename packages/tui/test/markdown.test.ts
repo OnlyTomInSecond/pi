@@ -113,6 +113,21 @@ describe("Markdown component", () => {
 			}
 		});
 
+		it("parses only the growing tail when the streamed source is appended", () => {
+			const markdown = new Markdown("", 0, 0, defaultMarkdownTheme, undefined, { incremental: true });
+			const parsed = () => (markdown as unknown as { streamedTokens?: { tokens: unknown[] } }).streamedTokens;
+
+			markdown.setText("first paragraph\n\nsecond paragraph\n\nthird paragraph");
+			markdown.render(80);
+			const firstToken = parsed()?.tokens[0];
+			assert.ok(firstToken, "expected the parse to keep its leading tokens");
+
+			markdown.setText("first paragraph\n\nsecond paragraph\n\nthird paragraph\n\nfourth paragraph");
+			markdown.render(80);
+
+			assert.strictEqual(parsed()?.tokens[0], firstToken, "expected the leading token to be reused");
+		});
+
 		it("matches a full render at every streaming step of representative sources", () => {
 			const sources = [
 				"intro\n\nparagraph two\n\n```ts\nconst a = 1;\n```\n\ntail",
