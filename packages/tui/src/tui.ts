@@ -1507,11 +1507,27 @@ export abstract class TuiBase extends Container implements TUI {
 	 * of components without focus have no CURSOR_MARKER and stay visible.
 	 */
 	protected resolveFakeCursors(lines: string[]): string[] {
-		return lines.map((line) => {
-			if (!line.includes(FAKE_CURSOR_START)) return line;
-			const resolved = this.showHardwareCursor ? line.replace(FOCUSED_FAKE_CURSOR, "$1$2") : line;
-			return resolved.replaceAll(FAKE_CURSOR_START, "\x1b[7m").replaceAll(FAKE_CURSOR_END, "\x1b[27m");
-		});
+		// Most frames (the committed prefix, and any tail without a focused editor) contain no fake
+		// cursor at all. Find the first line that has one and return the input array untouched otherwise.
+		let firstMarker = -1;
+		for (let i = 0; i < lines.length; i++) {
+			if (lines[i]!.includes(FAKE_CURSOR_START)) {
+				firstMarker = i;
+				break;
+			}
+		}
+		if (firstMarker === -1) return lines;
+
+		const resolved = lines.slice();
+		for (let i = firstMarker; i < resolved.length; i++) {
+			const line = resolved[i]!;
+			if (!line.includes(FAKE_CURSOR_START)) continue;
+			const withHardwareCursor = this.showHardwareCursor ? line.replace(FOCUSED_FAKE_CURSOR, "$1$2") : line;
+			resolved[i] = withHardwareCursor
+				.replaceAll(FAKE_CURSOR_START, "\x1b[7m")
+				.replaceAll(FAKE_CURSOR_END, "\x1b[27m");
+		}
+		return resolved;
 	}
 
 	/**

@@ -1021,4 +1021,24 @@ describe("TUI fake cursor", () => {
 			tui.stop();
 		}
 	});
+
+	it("returns the input array untouched when no line has a fake cursor", () => {
+		const tui = new FakeCursorProbe(new VirtualTerminal(20, 5));
+		const lines = ["plain", "lines"];
+		assert.strictEqual(tui.resolve(lines), lines);
+	});
+
+	it("resolves only the lines that carry a fake cursor", () => {
+		const tui = new FakeCursorProbe(new VirtualTerminal(20, 5));
+		const lines = ["plain", `x${renderFakeCursor("b")}y`, "plain again"];
+		const resolved = tui.resolve(lines);
+		assert.notStrictEqual(resolved, lines);
+		assert.deepStrictEqual(resolved, ["plain", "x\x1b[7mb\x1b[27my", "plain again"]);
+	});
 });
+
+class FakeCursorProbe extends TuiMainScreen {
+	resolve(lines: string[]): string[] {
+		return this.resolveFakeCursors(lines);
+	}
+}
