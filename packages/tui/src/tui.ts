@@ -525,6 +525,8 @@ export interface CommittedTUI extends TUI {
 	readonly [COMMITTED_TUI]: true;
 	setCommittedComponent(component: Component | undefined): void;
 	invalidateCommitted(): void;
+	/** Children were appended to the committed component; render only the additions. */
+	appendCommitted(): void;
 	captureRenderState(): TuiMainScreenRenderState;
 	restoreRenderState(state: TuiMainScreenRenderState): void;
 }

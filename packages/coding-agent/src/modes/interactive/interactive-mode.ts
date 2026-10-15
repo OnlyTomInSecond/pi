@@ -454,6 +454,11 @@ function invalidateCommittedTranscript(renderer: TuiMainScreen | TuiAltScreen | 
 	if (renderer && isCommittedTUI(renderer)) renderer.invalidateCommitted();
 }
 
+/** Render appended committed transcript components without rebuilding the cached prefix. */
+function appendCommittedTranscript(renderer: TuiMainScreen | TuiAltScreen | undefined): void {
+	if (renderer && isCommittedTUI(renderer)) renderer.appendCommitted();
+}
+
 export class InteractiveMode {
 	private runtimeHost: AgentSessionRuntime;
 	private renderer: TuiMainScreen | TuiAltScreen;
@@ -921,7 +926,7 @@ export class InteractiveMode {
 		if (this.chatContainer.children.length === 0) return;
 		const finalized = this.chatContainer.children.splice(0);
 		for (const component of finalized) this.committedTranscript.addChild(component);
-		invalidateCommittedTranscript(this.renderer);
+		appendCommittedTranscript(this.renderer);
 	}
 
 	/** Clear the transcript and restore the static header and resource sections. */

@@ -166,7 +166,7 @@ measure("commit one component", 1, () => {
 	tail.clear();
 	tail.addChild(nextStreaming);
 	tail.addChild(new Text("> prompt", 1, 0));
-	tui.invalidateCommitted();
+	tui.appendCommitted();
 });
 
 // Width change rewraps the committed prefix.

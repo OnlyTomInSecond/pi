@@ -7,6 +7,7 @@ import {
 	COMMITTED_TUI,
 	type CommittedTUI,
 	type Component,
+	Container,
 	TuiBase,
 	type TuiMainScreenRenderState,
 	type TuiStopOptions,
@@ -64,6 +65,10 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 	private committedWidth = -1;
 	private committedDirty = true;
 	private committedJustRendered = false;
+	/** Committed component children already rendered into {@link committedLines}. */
+	private committedChildCount = 0;
+	/** Children were appended to the committed component and can be rendered incrementally. */
+	private committedAppendPending = false;
 	private previousWidth = 0;
 	private previousHeight = 0;
 	private cursorRow = 0;
@@ -81,12 +86,28 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 		this.committedLines = [];
 		this.committedWidth = -1;
 		this.committedDirty = true;
+		this.committedChildCount = 0;
+		this.committedAppendPending = false;
 		this.requestRender();
 	}
 
 	/** Mark the committed prefix dirty so it is re-rendered on the next frame. */
 	invalidateCommitted(): void {
 		this.committedDirty = true;
+		this.committedAppendPending = false;
+		this.requestRender();
+	}
+
+	/**
+	 * Mark that children were appended to the committed component since the last frame. The added
+	 * children are rendered and appended to the cached prefix instead of re-rendering all of it.
+	 */
+	appendCommitted(): void {
+		if (this.committedComponent instanceof Container) {
+			this.committedAppendPending = true;
+		} else {
+			this.committedDirty = true;
+		}
 		this.requestRender();
 	}
 
@@ -100,15 +121,31 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 		if (!this.committedComponent) {
 			this.committedLines = [];
 			this.committedWidth = width;
+			this.committedChildCount = 0;
+			this.committedAppendPending = false;
 			return this.committedLines;
 		}
-		if (!this.committedDirty && this.committedWidth === width) {
+		if (this.committedDirty || this.committedWidth !== width) {
+			this.committedLines = this.resolveFakeCursors(this.committedComponent.render(width));
+			this.committedWidth = width;
+			this.committedDirty = false;
+			this.committedAppendPending = false;
+			this.committedJustRendered = true;
+			this.committedChildCount =
+				this.committedComponent instanceof Container ? this.committedComponent.children.length : 0;
 			return this.committedLines;
 		}
-		this.committedLines = this.resolveFakeCursors(this.committedComponent.render(width));
-		this.committedWidth = width;
-		this.committedDirty = false;
-		this.committedJustRendered = true;
+		if (this.committedAppendPending) {
+			this.committedAppendPending = false;
+			// appendCommitted() only sets this flag when the committed component is a Container.
+			const committed = this.committedComponent as Container;
+			for (let i = this.committedChildCount; i < committed.children.length; i++) {
+				for (const line of this.resolveFakeCursors(committed.children[i]!.render(width))) {
+					this.committedLines.push(line);
+				}
+			}
+			this.committedChildCount = committed.children.length;
+		}
 		return this.committedLines;
 	}
 
@@ -166,6 +203,8 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 		this.committedLines = [];
 		this.committedWidth = -1;
 		this.committedDirty = true;
+		this.committedChildCount = 0;
+		this.committedAppendPending = false;
 		this.previousWidth = -1;
 		this.previousHeight = -1;
 		this.cursorRow = 0;
@@ -299,10 +338,12 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 		// The committed prefix is stable when it was not re-rendered and did not shrink. Overlay
 		// compositing and kitty materialization replace `head` with a flat array, forcing a rebuild.
 		const previousTotal = this.previousLines.length;
+		// A committed prefix that only grew was appended to (see appendCommitted()), so the diff can
+		// still start at the previous committed boundary instead of rebuilding the whole frame.
 		let rebuild =
 			committedRefreshed ||
 			this.hasOverlayEntries ||
-			head.length !== this.previousCommittedCount ||
+			head.length < this.previousCommittedCount ||
 			head.length > previousTotal;
 
 		// Extract cursor position before formatting line resets (marker must be found first)

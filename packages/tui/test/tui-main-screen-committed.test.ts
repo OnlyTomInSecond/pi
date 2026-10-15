@@ -1,6 +1,6 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
-import type { Component } from "../src/tui.ts";
+import { type Component, Container } from "../src/tui.ts";
 import { TuiMainScreen } from "../src/tui-main-screen.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
@@ -91,5 +91,42 @@ describe("TuiMainScreen committed prefix", () => {
 		tui.renderNow();
 		assert.deepStrictEqual((await terminal.flushAndGetViewport()).slice(0, 5), ["c1", "c2", "l1", "l2", "l3"]);
 		assert.strictEqual(committed.renderCount, 2);
+	});
+
+	it("appends new committed children without re-rendering the prefix", async () => {
+		const terminal = new VirtualTerminal(40, 10);
+		const tui = new TuiMainScreen(terminal);
+		const committed = new Container();
+		const first = new LinesComponent(["c1", "c2"]);
+		const second = new LinesComponent(["c3"]);
+		committed.addChild(first);
+		committed.addChild(second);
+		const pending = new LinesComponent(["c4", "c5"]);
+		const live = new Container();
+		live.addChild(pending);
+		live.addChild(new LinesComponent(["l1"]));
+		tui.setCommittedComponent(committed);
+		tui.addChild(live);
+		tui.renderNow();
+		assert.deepStrictEqual((await terminal.flushAndGetViewport()).slice(0, 5), ["c1", "c2", "c3", "c4", "c5"]);
+
+		// Promote the finalized tail component into the prefix, as the coding agent does.
+		live.removeChild(pending);
+		committed.addChild(pending);
+		live.addChild(new LinesComponent(["l2"]));
+		tui.appendCommitted();
+		tui.renderNow();
+
+		assert.strictEqual(first.renderCount, 1, "existing committed children must not re-render");
+		assert.strictEqual(second.renderCount, 1);
+		assert.deepStrictEqual((await terminal.flushAndGetViewport()).slice(0, 7), [
+			"c1",
+			"c2",
+			"c3",
+			"c4",
+			"c5",
+			"l1",
+			"l2",
+		]);
 	});
 });
