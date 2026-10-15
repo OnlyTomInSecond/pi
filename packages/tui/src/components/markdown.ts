@@ -533,8 +533,9 @@ export class Markdown implements Component {
 			emptyLines.push(line);
 		}
 
-		// Combine top padding, content, and bottom padding
-		const result = emptyLines.concat(contentLines, emptyLines);
+		// Combine top padding, content, and bottom padding. Without vertical padding the content
+		// array is already the result, so a streaming message avoids copying every line again.
+		const result = emptyLines.length === 0 ? contentLines : emptyLines.concat(contentLines, emptyLines);
 
 		// Update cache
 		this.cachedText = this.text;
