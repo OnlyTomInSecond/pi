@@ -144,6 +144,22 @@ measure("streaming (large tail)", 360, (frame) => {
 });
 console.log(`large tail=${tail.render(COLUMNS).length} lines (small tail was ${largeTailLines})`);
 
+// Truncation: the live tail loses rows while a line above the end also changes, as a reflowing
+// streamed table does. This exercises the deleted-line cleanup, which must stay incremental.
+const shrinking = new Markdown(assistantMarkdown.repeat(3), 1, 0, theme, undefined, { incremental: true });
+tail.clear();
+tail.addChild(shrinking);
+tail.addChild(new Text("> prompt", 1, 0));
+let shrinkSource = assistantMarkdown.repeat(3);
+tui.renderNow();
+measure("truncating live tail", 50, () => {
+	shrinkSource = shrinkSource.slice(0, Math.max(400, shrinkSource.length - 11));
+	shrinking.setText(`${shrinkSource}\n\nchanged`);
+});
+tail.clear();
+tail.addChild(new Text("> prompt", 1, 0));
+tui.renderNow();
+
 // Overlay open, as when a selector dialog is visible.
 const overlayBox = new Box(1, 1);
 overlayBox.addChild(new Text("overlay content here", 1, 1));
