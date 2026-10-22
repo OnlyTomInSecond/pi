@@ -518,17 +518,20 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 					fullRender(true);
 					return;
 				}
-				const clearStartOffset = totalLines === 0 ? 0 : 1;
-				if (extraLines > 0 && clearStartOffset > 0) {
-					output.append(`\x1b[${clearStartOffset}B`);
-				}
-				for (let i = 0; i < extraLines; i++) {
-					output.append("\r\x1b[2K");
-					if (i < extraLines - 1) output.append("\x1b[1B");
-				}
-				const moveBack = Math.max(0, extraLines - 1 + clearStartOffset);
-				if (moveBack > 0) {
-					output.append(`\x1b[${moveBack}A`);
+				// Clear the deleted rows that are on screen, from the bottom up. Rows below the last
+				// screen row are already invisible: moving down to them clamps on the last row and
+				// clears live content, and scrolling to reach them desyncs the terminal from the
+				// renderer model.
+				const firstDeletedRow = totalLines;
+				const lastDeletedRow = Math.min(previousTotal - 1, prevViewportTop + height - 1);
+				if (lastDeletedRow >= firstDeletedRow) {
+					const moveDown = lastDeletedRow - targetRow;
+					if (moveDown > 0) output.append(`\x1b[${moveDown}B`);
+					for (let row = lastDeletedRow; row >= firstDeletedRow; row--) {
+						output.append("\r\x1b[2K");
+						if (row > firstDeletedRow) output.append("\x1b[1A");
+					}
+					if (firstDeletedRow > targetRow) output.append("\x1b[1A");
 				}
 				output.append("\x1b[?2026l");
 				output.flush();
@@ -657,7 +660,10 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 		// Track where cursor ended up after rendering
 		let finalCursorRow = renderEnd;
 
-		// If we had more lines before, clear them and move cursor back
+		// If we had more lines before, clear the deleted rows and move the cursor back to the end of
+		// the new content. Clearing must not write "\r\n" on the last screen row: that scrolls the
+		// terminal, and the cursor-up that follows cannot undo the scroll, which leaves the screen
+		// and the renderer model off by one row until a full redraw.
 		if (previousTotal > totalLines) {
 			// Move to end of new content first if we stopped before it
 			if (renderEnd < totalLines - 1) {
@@ -665,12 +671,19 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 				output.append(`\x1b[${moveDown}B`);
 				finalCursorRow = totalLines - 1;
 			}
-			const extraLines = previousTotal - totalLines;
-			for (let i = totalLines; i < previousTotal; i++) {
-				output.append("\r\n\x1b[2K");
+			const firstDeletedRow = Math.max(totalLines, prevViewportTop);
+			const lastDeletedRow = Math.min(previousTotal - 1, prevViewportTop + height - 1);
+			if (lastDeletedRow >= firstDeletedRow) {
+				const moveDown = lastDeletedRow - finalCursorRow;
+				if (moveDown > 0) output.append(`\x1b[${moveDown}B`);
+				for (let row = lastDeletedRow; row >= firstDeletedRow; row--) {
+					output.append("\r\x1b[2K");
+					if (row > firstDeletedRow) output.append("\x1b[1A");
+				}
+				const moveBack = firstDeletedRow - (totalLines - 1);
+				if (moveBack > 0) output.append(`\x1b[${moveBack}A`);
 			}
-			// Move cursor back to end of new content
-			output.append(`\x1b[${extraLines}A`);
+			finalCursorRow = Math.max(0, totalLines - 1);
 		}
 
 		output.append("\x1b[?2026l"); // End synchronized output
