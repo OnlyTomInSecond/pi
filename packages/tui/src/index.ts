@@ -190,6 +190,7 @@ export { TuiMainScreen } from "./tui-main-screen.ts";
 // Utilities
 export {
 	getOsc8LinkAtColumn,
+	replaceControlCharacters,
 	sliceByColumn,
 	stripTerminalSequences,
 	truncateToWidth,

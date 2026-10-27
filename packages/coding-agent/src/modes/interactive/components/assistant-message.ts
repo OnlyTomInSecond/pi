@@ -21,6 +21,8 @@ export class AssistantMessageComponent extends Container {
 	private lastMessage?: AssistantMessage;
 	private hasToolCalls = false;
 	private isStreaming = false;
+	private messageId?: string;
+	private timestamp?: string;
 	private thinkingVisibilityOverrides = new Map<number, boolean>();
 	/**
 	 * Latest streaming frame when it has not been rendered yet. Provider deltas arrive far more
@@ -46,6 +48,8 @@ export class AssistantMessageComponent extends Container {
 		hiddenThinkingLabel = "Thinking...",
 		outputPad = 1,
 		markdownTransformers: readonly MarkdownTransformer[] = [],
+		messageId?: string,
+		timestamp?: string,
 	) {
 		super();
 
@@ -54,6 +58,8 @@ export class AssistantMessageComponent extends Container {
 		this.hiddenThinkingLabel = hiddenThinkingLabel;
 		this.outputPad = outputPad;
 		this.markdownTransformers = markdownTransformers;
+		this.messageId = messageId;
+		this.timestamp = timestamp;
 
 		// Container for text/thinking content
 		this.contentContainer = new Container();
@@ -238,7 +244,13 @@ export class AssistantMessageComponent extends Container {
 			return existing;
 		}
 		const markdown = new Markdown(text, this.outputPad, 0, this.markdownTheme, undefined, {
-			transform: createMarkdownTransform("assistant", this.isStreaming, this.markdownTransformers),
+			transform: createMarkdownTransform(
+				"assistant",
+				this.isStreaming,
+				this.markdownTransformers,
+				this.messageId,
+				this.timestamp,
+			),
 			incremental: this.isStreaming,
 		});
 		this.textMarkdowns.set(index, markdown);
@@ -261,7 +273,13 @@ export class AssistantMessageComponent extends Container {
 				italic: true,
 			},
 			{
-				transform: createMarkdownTransform("assistant-thinking", this.isStreaming, this.markdownTransformers),
+				transform: createMarkdownTransform(
+					"assistant-thinking",
+					this.isStreaming,
+					this.markdownTransformers,
+					this.messageId,
+					this.timestamp,
+				),
 				incremental: this.isStreaming,
 			},
 		);
