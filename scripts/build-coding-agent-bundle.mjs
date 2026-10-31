@@ -141,6 +141,7 @@ for (const entry of [
 	join(codingAgentDistDir, "cli.js"),
 	join(codingAgentDistDir, "index.js"),
 	join(codingAgentDistDir, "rpc-entry.js"),
+	join(codingAgentDistDir, "cli", "restart-with-heap-limits.js"),
 	join(codingAgentDistDir, "utils", "image-resize-worker.js"),
 	join(codingAgentDistDir, "extensions", "codemode", "worker.js"),
 	join(aiDistDir, "api", "bedrock-converse-stream.js"),
@@ -246,6 +247,8 @@ const metafiles = [mainResult.metafile, lazyResult.metafile, codemodeWorkerResul
 validateExternalImports(metafiles);
 const cliLauncher = `#!/usr/bin/env node
 import { createRequire, enableCompileCache } from "node:module";
+// Imported before the runtime bundle so the semi-space cap is applied to a fresh heap.
+import "../cli/restart-with-heap-limits.js";
 
 enableCompileCache();
 createRequire(import.meta.url)("./cli-runtime.js");
