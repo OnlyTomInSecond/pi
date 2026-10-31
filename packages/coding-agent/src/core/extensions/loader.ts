@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import type { Provider } from "@earendil-works/pi-ai";
 import type { KeyId } from "@earendil-works/pi-tui";
 import type { createJiti } from "jiti";
-import { CONFIG_DIR_NAME, getAgentDir, isBunBinary, isBundledNode } from "../../config.ts";
+import { CONFIG_DIR_NAME, getAgentDir, getPackageDir, isBunBinary, isBundledNode } from "../../config.ts";
 import { resolvePath } from "../../utils/paths.ts";
 import { createEventBus, type EventBus } from "../event-bus.ts";
 import type { ExecOptions } from "../exec.ts";
@@ -20,6 +20,7 @@ import { readPiManifest } from "../pi-manifest.ts";
 import { createSyntheticSourceInfo, getSyntheticPathSource, isSyntheticPath } from "../source-info.ts";
 import { time } from "../timings.ts";
 import type { ModelRouteRequest, VirtualModelDefinition } from "../virtual-models.ts";
+import { installHostModuleHooks } from "./host-module-hooks.ts";
 import type {
 	EntryRenderer,
 	Extension,
@@ -59,6 +60,28 @@ function getVirtualModules(): Promise<Record<string, unknown>> {
 	virtualModulesPromise ??= import("./virtual-modules.ts").then((module) => module.VIRTUAL_MODULES);
 	return virtualModulesPromise;
 }
+
+/**
+ * Whether extensions can be loaded with a native `import()` instead of a jiti transform.
+ *
+ * The bundled runtimes inline the host packages, so a native import would resolve a second copy from
+ * the extension's own `node_modules`. `installHostModuleHooks()` redirects those specifiers to the
+ * bundled modules, which removes jiti's Babel pass and its retained parse output per extension.
+ * Runtimes without `module.registerHooks` (older Node, Bun) keep the transform path.
+ */
+let nativeExtensionLoadingPromise: Promise<boolean> | undefined;
+
+function useNativeExtensionLoading(): Promise<boolean> {
+	nativeExtensionLoadingPromise ??= (async () => {
+		if (!usesEmbeddedModules) return false;
+		const modules = await getVirtualModules();
+		return installHostModuleHooks({ modules, packageDir: getPackageDir() });
+	})();
+	return nativeExtensionLoadingPromise;
+}
+
+/** Extensions already loaded natively; reloading them needs the fresh transform path instead. */
+const nativeLoadedExtensions = new Set<string>();
 
 /**
  * Get aliases for jiti (used in built Node.js mode).
@@ -578,8 +601,13 @@ async function loadExtensionModule(extensionPath: string, cacheToken?: Extension
 	// Compiled binaries and the bundled Node distribution use embedded modules.
 	// Source TypeScript reuses host modules and root tsconfig paths. Unbundled
 	// Node builds use dist aliases and do not need the bundled virtual modules.
+	// A first load uses a native import when the host module hooks are available; a reload of the
+	// same path cannot see the edited file through Node's ESM cache, so it keeps the transform path.
+	const nativeLoading = await useNativeExtensionLoading();
+	const tryNative = nativeLoading && !nativeLoadedExtensions.has(extensionPath);
+	if (nativeLoading) nativeLoadedExtensions.add(extensionPath);
 	const resolutionOptions = usesEmbeddedModules
-		? { virtualModules: await getVirtualModules(), tryNative: false }
+		? { virtualModules: await getVirtualModules(), tryNative }
 		: isTypeScriptSourceRuntime
 			? { virtualModules: await getVirtualModules(), tsconfigPaths: true }
 			: { alias: getAliases() };
