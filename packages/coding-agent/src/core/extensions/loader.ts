@@ -98,6 +98,11 @@ function getAliases(): Record<string, string> {
 		"ai/dist/providers/all.js",
 		"@earendil-works/pi-ai/providers/all",
 	);
+	// jiti substitutes an alias prefix literally, so the exact pi-ai entry would turn
+	// `@earendil-works/pi-ai/utils/abort` into `.../dist/compat.js/utils/abort`. That resolution fails and
+	// the import falls back to the extension's own installed copy of pi-ai, which is a different module
+	// instance. The trailing slash registers the dist directory itself for every public subpath.
+	const piAiDistDir = path.dirname(piAiCompatEntry);
 
 	_aliases = {
 		"@earendil-works/pi-coding-agent": piCodingAgentEntry,
@@ -107,6 +112,7 @@ function getAliases(): Record<string, string> {
 		"@earendil-works/pi-ai/compat": piAiCompatEntry,
 		"@earendil-works/pi-ai/models": piAiModelsEntry,
 		"@earendil-works/pi-ai/oauth": piAiOauthEntry,
+		"@earendil-works/pi-ai/": piAiDistDir,
 		"@earendil-works/pi-ai": piAiCompatEntry,
 		"@mariozechner/pi-coding-agent": piCodingAgentEntry,
 		"@mariozechner/pi-agent-core": piAgentCoreEntry,
@@ -115,6 +121,7 @@ function getAliases(): Record<string, string> {
 		"@mariozechner/pi-ai/compat": piAiCompatEntry,
 		"@mariozechner/pi-ai/models": piAiModelsEntry,
 		"@mariozechner/pi-ai/oauth": piAiOauthEntry,
+		"@mariozechner/pi-ai/": piAiDistDir,
 		"@mariozechner/pi-ai": piAiCompatEntry,
 		typebox: typeboxEntry,
 		"typebox/compile": typeboxCompileEntry,

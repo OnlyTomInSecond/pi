@@ -51,6 +51,45 @@ describe("extensions discovery", () => {
 		expect(result.extensions.map((e) => path.basename(e.path)).sort()).toEqual(["bar.ts", "foo.ts"]);
 	});
 
+	it("resolves pi-ai utility subpaths to the host pi-ai, not a copy installed next to the extension", async () => {
+		// Extensions may depend on pi-ai and install their own copy. Resolving `@earendil-works/pi-ai/utils/*`
+		// from there gives a second module instance, so the loader must answer with the host's module.
+		const stubPackageDir = path.join(tempDir, "node_modules", "@earendil-works", "pi-ai");
+		fs.mkdirSync(path.join(stubPackageDir, "utils"), { recursive: true });
+		fs.writeFileSync(
+			path.join(stubPackageDir, "package.json"),
+			JSON.stringify({
+				name: "@earendil-works/pi-ai",
+				version: "0.0.0-stub",
+				exports: { ".": "./index.js", "./utils/*": "./utils/*.js" },
+			}),
+		);
+		fs.writeFileSync(path.join(stubPackageDir, "index.js"), "export const stub = true;");
+		fs.writeFileSync(
+			path.join(stubPackageDir, "utils", "headers.js"),
+			'export const stub = true; export function headersToRecord() { return "stub"; }',
+		);
+
+		fs.writeFileSync(
+			path.join(extensionsDir, "pi-ai-utils.ts"),
+			`
+				import { headersToRecord } from "@earendil-works/pi-ai/utils/headers";
+				(globalThis as { __piHeaders?: unknown }).__piHeaders = headersToRecord(new Headers());
+				export default function(pi) {
+					pi.registerCommand("test", { handler: async () => {} });
+				}
+			`,
+		);
+
+		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+
+		expect(result.errors).toHaveLength(0);
+		expect(result.extensions).toHaveLength(1);
+		const resolved = (globalThis as { __piHeaders?: unknown }).__piHeaders;
+		expect(resolved).toEqual({});
+		expect(resolved).not.toBe("stub");
+	});
+
 	it("loads the coding-agent entrypoint without rewriting pi-ai provider subpaths", async () => {
 		fs.writeFileSync(
 			path.join(extensionsDir, "coding-agent-import.ts"),
