@@ -47,6 +47,11 @@ export class Text implements Component {
 		this.cachedLines = undefined;
 	}
 
+	/** Same as invalidate(): the wrapped lines are rebuilt from `text`, which stays. */
+	releaseRenderCache(): void {
+		this.invalidate();
+	}
+
 	render(width: number): string[] {
 		// Check cache
 		if (this.cachedLines && this.cachedText === this.text && this.cachedWidth === width) {

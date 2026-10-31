@@ -139,6 +139,15 @@ export interface Component {
 	 * Called when theme changes or when component needs to re-render from scratch.
 	 */
 	invalidate(): void;
+
+	/**
+	 * Drop cached render output that the component can rebuild from its own source.
+	 *
+	 * The main-screen renderer calls this for transcript lines it has released, so a component that
+	 * keeps parsed tokens or rendered lines must discard them here and keep rendering correctly
+	 * afterwards, only slower. Components without caches can ignore it.
+	 */
+	releaseRenderCache?(): void;
 }
 
 export type TuiInputListenerResult = { consume?: boolean; data?: string } | undefined;
@@ -378,6 +387,21 @@ export class Container implements Component {
 		for (const child of this.children) {
 			child.invalidate?.();
 		}
+	}
+
+	releaseRenderCache(): void {
+		for (const child of this.children) {
+			child.releaseRenderCache?.();
+		}
+	}
+
+	/**
+	 * Rendered height of every child in the last render at `width`, or `undefined` when that render is
+	 * not current. The main-screen renderer uses it to map committed transcript lines to children.
+	 */
+	childHeights(width: number): number[] | undefined {
+		if (this.mouseLayout?.width !== width) return undefined;
+		return this.mouseLayout.children.map((entry) => entry.height);
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseDispatchResult | undefined {

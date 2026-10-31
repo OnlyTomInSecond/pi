@@ -385,6 +385,17 @@ export class Markdown implements Component {
 	}
 
 	/**
+	 * Drop the parse and every rendered line. The source stays, so the next render rebuilds the same
+	 * output. Used by the main-screen renderer once transcript lines are no longer cached.
+	 */
+	releaseRenderCache(): void {
+		this.invalidate();
+		// A token tree is about ten times the size of its source and only pays off while streaming.
+		this.cachedTokens = undefined;
+		this.streamedTokens = undefined;
+	}
+
+	/**
 	 * Parse the source, lexing only the tail when the last parse already covered a prefix of it.
 	 * Appending can only change the last token of the previous parse, so everything before it is kept.
 	 */

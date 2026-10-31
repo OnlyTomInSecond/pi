@@ -69,6 +69,10 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 	private committedChildCount = 0;
 	/** Children were appended to the committed component and can be rendered incrementally. */
 	private committedAppendPending = false;
+	/** Rendered lines of each committed child, in order, matching {@link committedLines}. */
+	private committedChildHeights: number[] = [];
+	/** Leading committed children whose render caches were dropped. */
+	private releasedCommittedChildren = 0;
 	private previousWidth = 0;
 	private previousHeight = 0;
 	private cursorRow = 0;
@@ -88,6 +92,7 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 		this.committedDirty = true;
 		this.committedChildCount = 0;
 		this.committedAppendPending = false;
+		this.resetCommittedChildHeights([]);
 		this.requestRender();
 	}
 
@@ -123,6 +128,7 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 			this.committedWidth = width;
 			this.committedChildCount = 0;
 			this.committedAppendPending = false;
+			this.resetCommittedChildHeights([]);
 			return this.committedLines;
 		}
 		if (this.committedDirty || this.committedWidth !== width) {
@@ -133,20 +139,64 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 			this.committedJustRendered = true;
 			this.committedChildCount =
 				this.committedComponent instanceof Container ? this.committedComponent.children.length : 0;
+			this.resetCommittedChildHeights(
+				this.committedComponent instanceof Container ? (this.committedComponent.childHeights(width) ?? []) : [],
+			);
 			return this.committedLines;
 		}
 		if (this.committedAppendPending) {
 			this.committedAppendPending = false;
 			// appendCommitted() only sets this flag when the committed component is a Container.
 			const committed = this.committedComponent as Container;
+			const appendedHeights: number[] = [];
 			for (let i = this.committedChildCount; i < committed.children.length; i++) {
-				for (const line of this.resolveFakeCursors(committed.children[i]!.render(width))) {
+				const lines = this.resolveFakeCursors(committed.children[i]!.render(width));
+				appendedHeights.push(lines.length);
+				for (const line of lines) {
 					this.committedLines.push(line);
 				}
 			}
+			this.appendCommittedChildHeights(appendedHeights);
 			this.committedChildCount = committed.children.length;
 		}
 		return this.committedLines;
+	}
+
+	/** Replace the per-child line counts after a full render. */
+	private resetCommittedChildHeights(heights: number[]): void {
+		this.committedChildHeights = heights;
+		this.releasedCommittedChildren = 0;
+	}
+
+	private appendCommittedChildHeights(heights: number[]): void {
+		for (const height of heights) this.committedChildHeights.push(height);
+	}
+
+	/**
+	 * Drop the render caches of committed transcript children the terminal can no longer repaint.
+	 *
+	 * The renderer rewrites lines up to the viewport top, so older rows only change again on a full
+	 * redraw, and a full redraw re-renders the committed component from source anyway (see
+	 * renderCommitted()). Keeping those caches costs memory in two places: the rendered lines, and,
+	 * for Markdown, the parse tree and per-token lines of every message in the session, which are
+	 * about ten times the size of the message source. Released children keep rendering correctly and
+	 * simply re-parse on the next full redraw.
+	 */
+	private releaseCommittedRenderCaches(): void {
+		const committed = this.committedComponent;
+		if (!(committed instanceof Container)) return;
+		if (this.committedChildHeights.length !== committed.children.length) return;
+		const repaintableFrom = Math.max(0, this.previousViewportTop);
+		let offset = 0;
+		let released = this.releasedCommittedChildren;
+		for (let i = released; i < this.committedChildHeights.length; i++) {
+			const end = offset + (this.committedChildHeights[i] ?? 0);
+			if (end > repaintableFrom) break;
+			committed.children[i]?.releaseRenderCache?.();
+			released = i + 1;
+			offset = end;
+		}
+		this.releasedCommittedChildren = released;
 	}
 
 	/**
@@ -205,6 +255,7 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 		this.committedDirty = true;
 		this.committedChildCount = 0;
 		this.committedAppendPending = false;
+		this.resetCommittedChildHeights([]);
 		this.previousWidth = -1;
 		this.previousHeight = -1;
 		this.cursorRow = 0;
@@ -303,6 +354,13 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 	}
 
 	protected doRender(): void {
+		if (this.stopped) return;
+		this.renderFrame();
+		// Must run after the frame: it uses the committed boundary this frame established.
+		this.releaseCommittedRenderCaches();
+	}
+
+	private renderFrame(): void {
 		if (this.stopped) return;
 		const width = this.terminal.columns;
 		const height = this.terminal.rows;
