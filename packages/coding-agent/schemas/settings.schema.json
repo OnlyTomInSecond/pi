@@ -402,6 +402,11 @@
       "description": "Register skills as /skill:name commands.",
       "default": true
     },
+    "appendExtensionPrompts": {
+      "type": "boolean",
+      "description": "Keep the tools and rules prompt sections when a custom system prompt replaces the default prompt, so extension tool snippets and prompt guidelines still reach the model.",
+      "default": false
+    },
     "terminal": {
       "type": "object",
       "properties": {

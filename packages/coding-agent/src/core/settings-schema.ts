@@ -335,6 +335,13 @@ export const SettingsSchema = Type.Object(
 				default: SETTINGS_DEFAULTS.enableSkillCommands,
 			}),
 		),
+		appendExtensionPrompts: Type.Optional(
+			Type.Boolean({
+				description:
+					"Keep the tools and rules prompt sections when a custom system prompt replaces the default prompt, so extension tool snippets and prompt guidelines still reach the model.",
+				default: SETTINGS_DEFAULTS.appendExtensionPrompts,
+			}),
+		),
 		terminal: Type.Optional(TerminalSettingsSchema),
 		images: Type.Optional(ImageSettingsSchema),
 		enabledModels: Type.Optional(

@@ -26,6 +26,11 @@ export interface BuildSystemPromptOptions {
 	promptGuidelines?: string[];
 	/** Text appended from user configuration before project context, skills, and cwd. */
 	appendSystemPrompt?: string;
+	/**
+	 * Keep the tools and rules sections when `customPrompt` replaces the default prompt, so
+	 * tool snippets and extension prompt guidelines still reach the model.
+	 */
+	appendExtensionPrompts?: boolean;
 	/** Additional XML-wrapped prompt sections keyed by tag name. */
 	sections?: Record<string, string>;
 	/** Working directory. */
@@ -43,6 +48,7 @@ export type NormalizedBuildSystemPromptOptions = BuildSystemPromptOptions & {
 	toolGuidelines: Record<string, string[]>;
 	promptGuidelines: string[];
 	appendSystemPrompt: string;
+	appendExtensionPrompts: boolean;
 	sections: Record<string, string>;
 	contextFiles: Array<{ path: string; content: string }>;
 	skills: Skill[];
@@ -69,6 +75,7 @@ export function normalizeBuildSystemPromptOptions(input: BuildSystemPromptOption
 		),
 		promptGuidelines: [...(input.promptGuidelines ?? [])],
 		appendSystemPrompt: input.appendSystemPrompt ?? "",
+		appendExtensionPrompts: input.appendExtensionPrompts ?? false,
 		sections: { ...(input.sections ?? {}) },
 		cwd: input.cwd,
 		contextFiles: (input.contextFiles ?? []).map((file) => ({ ...file })),
@@ -135,6 +142,7 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
 		toolGuidelines,
 		promptGuidelines,
 		appendSystemPrompt,
+		appendExtensionPrompts,
 		sections: customSections,
 		cwd,
 		contextFiles,
@@ -154,11 +162,15 @@ export function buildSystemPromptSections(input: BuildSystemPromptOptions): Syst
 	} else {
 		promptSections.preamble =
 			"You are a coding assistant running inside pi, a coding agent harness. Help users inspect files, run commands, and modify code.";
+	}
+	if (!customPrompt || appendExtensionPrompts) {
 		const visibleTools = declaredTools.filter((name) => !!toolSnippets[name]);
 		const tools =
 			visibleTools.length > 0 ? visibleTools.map((name) => `- ${name}: ${toolSnippets[name]}`).join("\n") : "(none)";
 		promptSections.tools = `${tools}\n\nAdditional tools may be available.`;
 		promptSections.rules = buildRules(declaredTools, toolGuidelines, promptGuidelines);
+	}
+	if (!customPrompt) {
 		promptSections.docs = `Pi documentation (read only when the user asks about the harness itself, its SDK, extensions, themes, skills, or TUI):
 - Main documentation: ${getReadmePath()}
 - Additional docs: ${getDocsPath()}

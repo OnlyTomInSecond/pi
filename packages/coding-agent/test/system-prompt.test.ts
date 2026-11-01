@@ -74,6 +74,30 @@ describe("buildSystemPrompt", () => {
 			);
 			expect(prompt).toContain("<cwd>\n/tmp\n</cwd>");
 		});
+
+		test("can append extension tool prompts to a custom prompt", () => {
+			const options = {
+				customPrompt: "You are Exact.",
+				selectedTools: ["custom"],
+				toolSnippets: { custom: "Run a custom task" },
+				toolGuidelines: { custom: ["Use custom carefully."] },
+				contextFiles: [],
+				skills: [],
+				cwd: "/tmp",
+			};
+
+			const replaced = buildSystemPrompt(options);
+			expect(replaced).not.toContain("<tools>");
+			expect(replaced).not.toContain("<rules>");
+
+			const appended = buildSystemPrompt({ ...options, appendExtensionPrompts: true });
+			expect(appended.startsWith("You are Exact.\n\n<tools>")).toBe(true);
+			expect(appended).toContain(
+				"<tools>\n- custom: Run a custom task\n\nAdditional tools may be available.\n</tools>",
+			);
+			expect(appended).toContain("<rules>\n- Use custom carefully.");
+			expect(appended).not.toContain("<docs>");
+		});
 	});
 
 	describe("default tools", () => {

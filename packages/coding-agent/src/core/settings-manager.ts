@@ -1360,6 +1360,10 @@ export class SettingsManager {
 		return resolveDefaultTools(Array.isArray(tools) ? tools.filter((tool) => typeof tool === "string") : []);
 	}
 
+	getAppendExtensionPrompts(): boolean {
+		return this.settings.appendExtensionPrompts ?? SETTINGS_DEFAULTS.appendExtensionPrompts;
+	}
+
 	setEnabledModels(patterns: string[] | undefined): void {
 		this.globalSettings.enabledModels = patterns;
 		this.markModified("enabledModels");
