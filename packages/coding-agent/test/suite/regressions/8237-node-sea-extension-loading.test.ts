@@ -61,9 +61,9 @@ describe("Node SEA extension loading", () => {
 		expect(state.createJiti).toHaveBeenCalledOnce();
 
 		const options = state.createJiti.mock.calls[0][1] as JitiOptionsProbe;
-		// Source TypeScript also uses virtual modules, so tryNative: false is what
-		// proves the compiled-binary branch took precedence over the source branch.
-		expect(options.tryNative).toBe(false);
+		// Bundled runtimes first try a native import, redirected by the host module hooks; jiti keeps
+		// the virtual modules for the transform fallback and for reloads.
+		expect(options.tryNative).toBe(true);
 		expect(options.alias).toBeUndefined();
 		expect(options.virtualModules?.typebox).toBeDefined();
 		expect(options.virtualModules?.["@earendil-works/pi-coding-agent"]).toBeDefined();

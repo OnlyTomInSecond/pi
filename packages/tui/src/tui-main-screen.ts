@@ -14,6 +14,14 @@ import {
 } from "./tui.ts";
 import { visibleWidth } from "./utils.ts";
 
+/** OSC 133 prompt markers at the start of a rendered line. Fullscreen uses them for prompt navigation. */
+const OSC133_ZONE_PREFIX = /^(?:\x1b\]133;[ABC](?:\x07|\x1b\\))+/;
+
+/** Drop OSC 133 prompt markers: the terminal reads 133;A as a new shell prompt, which ends program status (OSC 7501). */
+function stripOsc133(lines: string[]): string[] {
+	return lines.map((line) => line.replace(OSC133_ZONE_PREFIX, ""));
+}
+
 const KITTY_SEQUENCE_PREFIX = "\x1b_G";
 
 interface KittyImageHeader {
@@ -132,7 +140,7 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 			return this.committedLines;
 		}
 		if (this.committedDirty || this.committedWidth !== width) {
-			this.committedLines = this.resolveFakeCursors(this.committedComponent.render(width));
+			this.committedLines = stripOsc133(this.resolveFakeCursors(this.committedComponent.render(width)));
 			this.committedWidth = width;
 			this.committedDirty = false;
 			this.committedAppendPending = false;
@@ -150,7 +158,7 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 			const committed = this.committedComponent as Container;
 			const appendedHeights: number[] = [];
 			for (let i = this.committedChildCount; i < committed.children.length; i++) {
-				const lines = this.resolveFakeCursors(committed.children[i]!.render(width));
+				const lines = stripOsc133(this.resolveFakeCursors(committed.children[i]!.render(width)));
 				appendedHeights.push(lines.length);
 				for (const line of lines) {
 					this.committedLines.push(line);
@@ -378,10 +386,12 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 
 		// Render the committed prefix (cached) and the live tail separately. Only the tail is
 		// re-rendered every frame; the prefix is re-rendered on width change or invalidation.
-		// Fake cursors are resolved before compositing so overlays and line slicing see plain SGR codes.
+		// Fake cursors are resolved and OSC 133 markers dropped before compositing so overlays and
+		// line slicing see plain SGR codes, and so the terminal does not read a marker as a new
+		// shell prompt, which would end program status (OSC 7501).
 		let head = this.renderCommitted(width);
 		const committedRefreshed = this.committedJustRendered;
-		let tail = this.resolveFakeCursors(this.render(width));
+		let tail = stripOsc133(this.resolveFakeCursors(this.render(width)));
 
 		// Composite overlays into the rendered lines (before differential compare)
 		if (this.hasOverlayEntries) {
