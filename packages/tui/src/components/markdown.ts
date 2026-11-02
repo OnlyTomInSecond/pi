@@ -269,6 +269,7 @@ export interface MarkdownTheme {
 	italic: (text: string) => string;
 	strikethrough: (text: string) => string;
 	underline: (text: string) => string;
+	/** Highlighted lines of a code block. A Markdown component reuses the result for the same code until invalidate(). */
 	highlightCode?: (code: string, lang?: string) => string[];
 	/** Prefix applied to each rendered code block line (default: "  ") */
 	codeBlockIndent?: string;
@@ -287,8 +288,10 @@ export interface MarkdownOptions {
 	 * Reuse the rendered lines of top-level blocks whose source did not change. Streaming appends
 	 * to the source, so this keeps only the growing tail expensive to render instead of re-rendering
 	 * every block on each update. Intended for a component that is updated in place while streaming.
+	 * Pass a function to follow a component's streaming flag, which also restores full highlighting
+	 * once the stream ends.
 	 */
-	incremental?: boolean;
+	incremental?: boolean | (() => boolean);
 }
 
 interface InlineStyleContext {
@@ -358,6 +361,9 @@ export class Markdown implements Component {
 	// Rendered lines per top-level token while streaming. Entries are matched by the token's source,
 	// type and text, so appending to the source only re-renders the tokens that changed.
 	private cachedTokenLines?: { width: number; entries: RenderedTokenLines[] };
+	// Highlighted code of the last render, keyed by language and source, so a resize or a new spacing
+	// for a block reuses it instead of highlighting the block again.
+	private highlightedCode = new Map<string, string[]>();
 
 	constructor(
 		text: string,
@@ -376,11 +382,10 @@ export class Markdown implements Component {
 	}
 
 	setText(text: string): void {
-		if (text === this.text) {
-			return;
-		}
 		this.text = text;
-		// Keep the per-token memo: streaming changes only the trailing blocks, which the memo skips.
+		// Keep the per-token memo: streaming changes only the trailing blocks, which the memo skips. The
+		// rendered lines cannot be kept even for the same text, because a transform may depend on state
+		// outside it, such as a message that is no longer streaming.
 		this.cachedText = undefined;
 		this.cachedWidth = undefined;
 		this.cachedLines = undefined;
@@ -390,8 +395,10 @@ export class Markdown implements Component {
 		this.cachedText = undefined;
 		this.cachedWidth = undefined;
 		this.cachedLines = undefined;
-		// Rendered token lines depend on the theme and default style, which invalidate() resets.
+		// Rendered token lines, the styled prefix and highlighted code all carry theme colors.
 		this.cachedTokenLines = undefined;
+		this.highlightedCode.clear();
+		this.defaultStylePrefix = undefined;
 	}
 
 	/**
@@ -403,6 +410,12 @@ export class Markdown implements Component {
 		// A token tree is about ten times the size of its source and only pays off while streaming.
 		this.cachedTokens = undefined;
 		this.streamedTokens = undefined;
+	}
+
+	/** Whether the source is being appended to in place, which makes the tail-only parse and deferred highlighting pay off. */
+	private isIncremental(): boolean {
+		const incremental = this.options.incremental;
+		return typeof incremental === "function" ? incremental() : incremental === true;
 	}
 
 	/**
@@ -451,7 +464,9 @@ export class Markdown implements Component {
 			!streamed.frozenHasHtml &&
 			!source.includes("\r") &&
 			source.length > streamed.source.length &&
-			source.startsWith(streamed.source)
+			// Slicing and comparing beats startsWith here: this runs on every streamed frame, and
+			// startsWith walks the whole frozen prefix (hundreds of KB) character by character.
+			source.slice(0, streamed.source.length) === streamed.source
 		);
 	}
 
@@ -463,7 +478,7 @@ export class Markdown implements Component {
 		const frozenCount = Math.max(0, tokens.length - STREAMED_TAIL_MARGIN);
 		// Without an incremental consumer the cache would only retain tokens, and line endings would
 		// break the offsets because the lexer normalizes them.
-		if (this.options.incremental !== true || frozenCount < 1 || source.includes("\r")) {
+		if (!this.isIncremental() || frozenCount < 1 || source.includes("\r")) {
 			this.streamedTokens = undefined;
 			return;
 		}
@@ -746,11 +761,16 @@ export class Markdown implements Component {
 				// While streaming, a block whose closing fence has not arrived keeps growing, and the
 				// highlighter would run over the whole block again on every update. Style it plainly until the
 				// block is complete, then highlight it once; the block memo keeps the result afterwards.
-				const deferred = this.options.incremental === true && hasUnterminatedFence(token);
+				const deferred = this.isIncremental() && hasUnterminatedFence(token);
 				lines.push(this.theme.codeBlockBorder(`\`\`\`${token.lang || ""}`));
 				if (this.theme.highlightCode && !deferred) {
-					const highlightedLines = this.theme.highlightCode(token.text, token.lang);
-					for (const hlLine of highlightedLines) {
+					const key = `${token.lang ?? ""}\0${token.text}`;
+					let highlighted = this.highlightedCode.get(key);
+					if (!highlighted) {
+						highlighted = this.theme.highlightCode(token.text, token.lang);
+						this.highlightedCode.set(key, highlighted);
+					}
+					for (const hlLine of highlighted) {
 						lines.push(`${indent}${hlLine}`);
 					}
 				} else {

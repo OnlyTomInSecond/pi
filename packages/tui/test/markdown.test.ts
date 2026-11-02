@@ -196,12 +196,66 @@ describe("Markdown component", () => {
 			const grown = `${closed}\n\nafter\n`;
 			markdown.setText(grown);
 			markdown.render(80);
-			// The block left the trailing position, and the memo keeps it from then on.
+			// The block left the trailing position, and the block memo keeps its highlighting from then on.
 			markdown.setText(`${grown} and more`);
 			markdown.render(80);
-			assert.strictEqual(highlightCalls, 2);
+			assert.strictEqual(highlightCalls, 1);
 
 			assert.deepStrictEqual(markdown.render(80), new Markdown(`${grown} and more`, 0, 0, theme).render(80));
+		});
+	});
+
+	describe("Block reuse", () => {
+		afterEach(() => resetCapabilitiesCache());
+
+		function countingTheme(calls: string[]): MarkdownTheme {
+			return {
+				...defaultMarkdownTheme,
+				highlightCode: (code, lang) => {
+					calls.push(`${lang}:${code}`);
+					return code.split("\n").map((line) => chalk.green(line));
+				},
+			};
+		}
+
+		it("highlights a code block once across streamed text and resizes, and again after invalidate", () => {
+			const calls: string[] = [];
+			const markdown = new Markdown("```ts\nx\n```", 0, 0, countingTheme(calls));
+			markdown.render(80);
+			markdown.setText("```ts\nx\n```\n\nafter");
+			markdown.render(40);
+			assert.deepStrictEqual(calls, ["ts:x"]);
+			markdown.invalidate();
+			markdown.render(40);
+			assert.deepStrictEqual(calls, ["ts:x", "ts:x"]);
+		});
+
+		it("releases the highlighting with the render cache, so the next render highlights again", () => {
+			const calls: string[] = [];
+			const markdown = new Markdown("```ts\nx\n```", 0, 0, countingTheme(calls));
+			markdown.render(80);
+			// The main screen releases the caches of transcript lines it can no longer repaint.
+			markdown.releaseRenderCache();
+			markdown.render(80);
+			assert.deepStrictEqual(calls, ["ts:x", "ts:x"]);
+		});
+
+		it("renders a block again when the block after it changes its spacing", () => {
+			const markdown = new Markdown("# Title", 0, 0, defaultMarkdownTheme);
+			markdown.render(80);
+			markdown.setText("# Title\nfoo");
+			assert.deepStrictEqual(
+				markdown.render(80).map((line) => stripAnsi(line).trim()),
+				["Title", "", "foo"],
+			);
+		});
+
+		it("follows changed reference link definitions", () => {
+			setCapabilities({ images: null, trueColor: false, hyperlinks: false });
+			const markdown = new Markdown("[a][x]\n\n[x]: https://one.example", 0, 0, defaultMarkdownTheme);
+			markdown.render(80);
+			markdown.setText("[a][x]\n\n[x]: https://two.example");
+			assert.ok(stripAnsi(markdown.render(80).join("\n")).includes("https://two.example"));
 		});
 	});
 

@@ -442,7 +442,8 @@ drops, folds or resets.
 - **JSON plus `Uint8Array` leaves**, with a bytes schema type, defined independently of the transport. Every link
   carries the same `Message` through its codec (section 22); parts are encoded at their origin; byte segments travel
   raw, never base64. Same-host calls (no link) pass values by reference.
-- Schemas are TypeBox and must describe data (no callbacks, no native types, no runtime codecs). Method arguments are
+- Schemas are plain JSON Schema built with `@earendil-works/pi-schema` (decision "The schema switch") and must
+  describe data (no callbacks, no native types, no runtime codecs); `format` is an annotation, never checked. Method arguments are
   validated at the provider for every caller against closed schemas (section 5, R7, Q12, Q15); results and state are
   never validated (section 30). Values are immutable by convention once handed over (Delta's rule): nobody mutates a
   value it got, and nothing is copied or frozen to enforce it. There is no development mode (R9): one behavior
@@ -572,7 +573,7 @@ host.serve(Notes, ({ session }, principal, self) =>
   (`invalid/member` outside it).
 - **Params** (owner, 2026-10-21/22): a flat record of required fields, each `str()`, `int()`, `bool()` or `oneOf(...)`
   of string literals, constraints allowed (`str({ pattern })`, `int({ min: 0 })`); no defaults, optional, nested or
-  unknown fields. Checked for every caller with one compiled closed-object TypeBox check (a missing or extra field
+  unknown fields. Checked for every caller with one compiled closed-object pi-schema check (a missing or extra field
   fails `invalid/params`). The identity key is the field values in declared order, each escaped, joined with `|`.
   Params are never copied or frozen: the object keeps the caller's object, immutable by convention.
 - **Arguments (R7, Q12, Q15):** always validated with the provider's schema, whoever the caller is (trusted code is
@@ -592,8 +593,8 @@ host.serve(Notes, ({ session }, principal, self) =>
   link protocol (adding one bumps the protocol version; a receiver rejects unknown reasons; a test pins the list):
   `invalid` (`args`, `params`, `member`, `host_address`, `reentrant`, `read_after_bulk`, `cycle`), `contract_mismatch`
   (`updating`), `forbidden` (`revoked`), `gone`, `not_ready`, `released` (`ended`, `closed`, `settled`, `version`, `discarded`; none for a holder's own release), `too_large` (`part`), `unavailable` (`locked`,
-  `park_timeout`, `busy`, `storage_failed`, `undeclared`: a registry no plugin serves here, slice 8), `aborted`. A failed check names TypeBox's instance path ("unknown field", "missing", else TypeBox's
-  message; keys containing `/` or `~` make the path ambiguous, documented). Plugins throw `PluginError(code, message,
+  `park_timeout`, `busy`, `storage_failed`, `undeclared`: a registry no plugin serves here, slice 8), `aborted`. A failed check names pi-schema's JSON Pointer path ("unknown field", "missing", else
+  pi-schema's message; `~` and `/` in keys escaped as `~0`, `~1`). Plugins throw `PluginError(code, message,
   details?)` for codes of their own; anything else crosses a link as the plugin code `internal` with its message, never
   a stack or a cause; plugin errors never use Chord's codes. An error rebuilt from the wire is not copied and only its
   envelope is checked; a malformed envelope is a protocol error.
@@ -1961,7 +1962,10 @@ type ReloadReport = {
 - **A plugin** is a directory with a `package.json` (its `name` is the plugin's name, npm style) and one file per facet
   kind the app names; plugins come from roots found by directory listing (no source parsing; the first root wins a
   duplicate name). Dependencies between plugins resolve by contract name at runtime; names are prefixed
-  (`<plugin>.<name>`; tools `<plugin>_<name>`).
+  (`<plugin>.<name>`; tools `<plugin>_<name>`). A plugin carries the contracts it was written against (decision "Contracts come from where the
+  plugin's code came from"): plugins that change together import each other by relative path within a root
+  (copied into the importer's script); others take contracts as an npm dependency at a fixed version (built in slice 12,
+  which removed slice 10's imports by plugin name).
 - **Loader D:** one esbuild script per facet (its own files, copied files of other plugins, its npm `dependencies`
   inlined; host packages, `chord.external` packages and Node builtins external, passed in at evaluation); each facet kind is defined once, `kinds: { <kind>: { platform: "node" | "browser", hostPackages } }` (slice 11); evaluated with
   `vm.Script` under a stable filename per (plugin, kind, digest); no module map: old generations are reclaimed by the
@@ -1975,6 +1979,40 @@ type ReloadReport = {
   optimization, the web's in slice 11.
 - Project plugins, trust, snapshots, scopes and npm/git package installs: `apps/p2/docs/plugin-loading.md` (still the
   reference for those; not in 7c).
+
+### The plugin model (2026-11-01; slice 12)
+
+Decisions "Contracts come from where the plugin's code came from", "Plugins import only the app's versioned API",
+"The plugin model, points 3, 4, 5 and 8, imports and builds", "Single-file plugins", "Testing a plugin alone". The
+rule underneath: a plugin carries what it was written against, never the running app's newest file.
+
+- **What a plugin may import:** its own files; the app's versioned API (`@acme/app/v3`, never Chord directly: Chord is
+  not a host package plugins may name; the API re-exports the Chord surface the app supports); its npm `dependencies`
+  (bundled at the installed version); other plugins' contract files: by relative path within one repository
+  (`../notes/contract.ts`, the same commit holds both sides), by package name across repositories (`@bob/notes`,
+  `@bob/notes/web`, pinned by an npm version or a git ref `github:bob/notes#<commit>`; a plugin inside a
+  multi-plugin repository through a dependency on the whole repository, by path into it or its `exports`). A package
+  lists the plugins it provides in `chord.plugins` (as pi's manifest). One facet imports one API version only.
+- **Versions:** the app lists the API versions it provides; an unlisted one is a build error naming the available ones.
+  The process runs one Chord: an older API version is a layer over today's, re-exporting Chord's compatibility module
+  for its previous API while Chord keeps one; contracts bind through `accepts` whatever Chord runs.
+- **Split by host kind:** the API has a shared module and per-kind modules (`/v3/web`, `/v3/tui`, `/v3/server`,
+  `/v3/worker`); a plugin's contract files mirror it (`contract.ts`, `contract.web.tsx`, `contract.tui.ts`, ...). A
+  contract file mentions native things only through `import type`. The build checks every import by the file it
+  resolves to: a per-kind file or module only for its kind, a package the kind does not provide refused. A token or
+  `local` contract used on one kind lives in that kind's file. Shared UI between plugins: an imported file (inlined,
+  frozen at the importer's build) or a registry entry (one live instance).
+- **Base code** is the API modules, bootstrap (hosts, store, components such as `createHttp` and `createWorkers`, which
+  take settings and process values and return facets) and one start-data facet serving process values as core
+  objects. Every implementation, the harness and core registry providers included, is a plugin; the app's own root is
+  required (a failure at startup stops the app).
+- **Single-file plugins:** `<name>.<kind>.ts(x)` at a root's top, grouped by name, no `package.json`, importing only the
+  API; a directory of the same name replaces it as the same plugin.
+- **Installs** from git (a branch, tag or commit cloned into a root) or npm. **Builds** are one esbuild call per facet
+  from source (TS, TSX, JS, JSON, CSS, assets and WASM by URL); plugins bring no build hooks.
+- **`testPlugin(dir, { kind, modules, stubs, start?, principal? }, ctx)`:** the plugin built as in production on an
+  in-memory host and store, its dependencies served by stub facets, contributions to registries collected for the
+  test, the contracts nobody serves listed.
 
 - **UI reload vs. leaving:** "leaving" is never derived from an unmount, only from explicit navigation or presence (a
   dropped reference); a component unmounted by a reload has not left.
@@ -1997,7 +2035,7 @@ validation, no clone of snapshots or ops.
 - **The protocol version** travels in `hello`; hosts of different versions refuse each other (a web page reloads for
   a newer server). Error reasons and message kinds are part of it. Until p3 ships, changes keep `PROTOCOL_VERSION` 1
   (nothing is deployed); after that every message or reason change bumps it.
-- **One typed `Message`** (owner, 2026-10-22, "Wire protocol"): a TypeBox schema `MESSAGE`, a tagged union over
+- **One typed `Message`** (owner, 2026-10-22, "Wire protocol"): a pi-schema schema `MESSAGE`, a tagged union over
   `kind`, from which the protocol types derive; every decoded message is checked against it (compiled once) unless
   the link is trusted (section 3). Kinds:
 
@@ -2232,6 +2270,45 @@ fails closed when stale; a start waits for a draining old holder without polling
   complete sets (`createPluginRuntime`, no esbuild); `workers.step(name)` ships a rollout's set to every worker (D12:
   `{ host, report } | { host, stopped: true } | { host, error }` per worker).
 
+### The app kit (`chord/next/app`; slice 13)
+
+Decisions "The app kit, point 1" to "point 5". `startApp(options)` on the server, `startWorker(options)` in a worker
+entry. Opinionated and small: an app is its API, its built-in plugins and a start script.
+
+- **Shape:** the app's layout is fixed: `src/api/v<n>/` (shared and per-kind modules) and the built-in plugins root
+  `plugins/`. The data directory is a `startApp` option (no environment variables), default a dot directory named after
+  the app in the home directory. One server; worker kinds are a list the app defines, each a host kind with its own
+  params (sharding is the app's) and how it starts (entry, start data, principal, idle time); zero kinds is a server
+  with clients only.
+- **Principals and users:** the principal is tiny (a kind and an id) and the app's type; the kit needs only its server
+  and worker variants. User data lives in objects keyed by the user's id. Optional kit plugins: users (accounts with an
+  app-supplied profile schema), authenticators (device pairing, invite links, an ephemeral pick-a-name login).
+- **Authentication:** no owner by loopback alone: the start script prints a link with a one-time token that sets a
+  signed owner cookie; deny by default (the HTTP component refuses requests without a principal unless the route or
+  socket is public); a session helper issues and revokes sessions; command-line clients send a token in a header (an
+  owner token file readable only by the app's OS user; a device pairing flow from other machines).
+- **Storage:** one store for the server, a directory per worker under its kind and address with its store; plugins
+  never use data-directory paths. A files plugin per address (`put`, chunked transfers, a watchable index, caps) is
+  the default file storage; raw directories only where a real path is needed, owned by one object, under the worker's
+  directory. Export and import per address: the store's archive plus the worker's directory.
+- **Plugins:** the app's root (required) and the user's root in the data directory; installs from git or npm; one
+  "apply changes" call builds and rolls out to the server, then every running worker, exposed by the app as it likes.
+
+### Web and TUI (slice 11)
+
+Decision "Slice 11's points" and "Slice 11, P3" to "P9".
+
+- `chord/next/web`: serving the surface, a page's client host with its connection loop (p2's `keepConnected`), loading
+  and applying the plugins' web facets. A base bundle per client kind built on the server from the app's entry
+  (content-hashed); at page load the kind's current plugin set as one combined file named by its hash, later changed
+  plugins one script each, each a script that registers itself (no eval); new scripts apply in place (`host.reload` in
+  the page); pages learn of them through an object the web component serves (the current set); a base code change
+  reloads the page.
+- `chord/next/react`: `HostProvider`, `useHold`, `useWatch`, `useRegistry`, `useRefState`.
+- `chord/next/tui`: a Node client connecting with a token, always running the downloaded code in a sandbox (a
+  permission-dropped worker thread, a bridge terminal, the trusted launcher outside); a component scope (`hold`,
+  `watch`, `registry`, released on dispose, one `changed` callback for the app's redraw), no pi-tui dependency.
+
 ### Channels
 
 WebSocket byte channels with acknowledged windows, separate from object links, wait for a second user after the
@@ -2416,7 +2493,7 @@ const accepted = checkAccepts(NotesV2, {
   providers fail at declaration naming the member; unknown keys and wrong shapes are rejected.
 - **The fingerprint** is a hash (`hash64`, portable, not a security boundary) of a schema-aware, data-only normal form
   (`NORMAL_FORM_VERSION`, tied to the protocol): annotations dropped only on schema nodes, `required`/`enum` sorted,
-  union and intersection order kept (it is meaning: defaults), a whitelist of TypeBox keywords, executable features
+  union and intersection order kept (it is meaning: defaults), a whitelist of JSON Schema keywords, executable features
   rejected; bytes are a `{ type: "bytes" }` data marker. Schemas are deep-copied into a private history (never frozen; immutable by convention).
 - **Schema helpers:** `str num int bool nul lit oneOf union obj arr map opt bytes unknown` and `type Static`.
 - Chord wraps state mappings as a derive and diffs per object and version (section 22); members an old consumer does not know do
