@@ -128,6 +128,22 @@ describe("Markdown component", () => {
 			assert.strictEqual(parsed()?.tokens[0], firstToken, "expected the leading token to be reused");
 		});
 
+		it("keeps parsing only the tail when the streamed source holds comparison signs or inline comments", () => {
+			const markdown = new Markdown("", 0, 0, defaultMarkdownTheme, undefined, { incremental: true });
+			const parsed = () => (markdown as unknown as { streamedTokens?: { tokens: unknown[] } }).streamedTokens;
+
+			const head = "if a < b and <!-- note --> c > d\n\nsecond paragraph\n\nthird paragraph";
+			markdown.setText(head);
+			markdown.render(80);
+			const firstToken = parsed()?.tokens[0];
+			assert.ok(firstToken, "expected the parse to keep its leading tokens");
+
+			markdown.setText(`${head}\n\nfourth paragraph`);
+			markdown.render(80);
+
+			assert.strictEqual(parsed()?.tokens[0], firstToken, "expected the leading token to be reused");
+		});
+
 		it("matches a full render at every streaming step of representative sources", () => {
 			const sources = [
 				"intro\n\nparagraph two\n\n```ts\nconst a = 1;\n```\n\ntail",
@@ -137,6 +153,11 @@ describe("Markdown component", () => {
 				"| a | b |\n| - | - |\n| 1 | 2 |\n\nafter",
 				"see [ref]\n\n[ref]: https://example.com\n\nmore",
 				"<div>block</div>\n\ninline <b>tag</b>\n\nafter",
+				// A comment block is dropped from the tokens, so the frozen prefix must still cover the source.
+				"before\n\n<!-- a comment -->\n\nafter\n\nlast",
+				// An inline comment and a comparison sign stay in the frozen prefix, so the tail keeps parsing.
+				"if a < b and <!-- note --> c > d\n\nsecond\n\nthird\n\nfourth",
+				"<!-- leading -->\n\n# head\n\ntail grows here",
 				"# head\n\nsetext\n=====\n\nlast\r\n\r\nend",
 			];
 			for (const source of sources) {
@@ -2105,6 +2126,49 @@ bar`,
 				joinedPlain.includes("<div>") && joinedPlain.includes("</div>"),
 				"Should render HTML in code blocks",
 			);
+		});
+	});
+
+	describe("HTML comments", () => {
+		// Regression tests for https://github.com/earendil-works/pi/issues/11710
+		function renderPlain(text: string): string[] {
+			return new Markdown(text, 0, 0, defaultMarkdownTheme).render(60).map((line) => stripAnsi(line).trimEnd());
+		}
+
+		it("hides block and inline comments without extra spacing", () => {
+			assert.deepStrictEqual(
+				renderPlain(
+					"## [1.0.0]\n\n<!-- release-notes:start -->\nFixed a bug.\n\nSee <!-- todo: link --> the docs.",
+				),
+				renderPlain("## [1.0.0]\n\nFixed a bug.\n\nSee the docs."),
+			);
+		});
+
+		it("drops one blank line around comment-only blocks", () => {
+			assert.deepStrictEqual(
+				renderPlain(
+					"<!-- start -->\n\n## [1.0.0]\n\n<!-- a -->\n\n- item\n\n<!-- b -->\n\n## [0.9.0]\n\n<!-- end -->",
+				),
+				renderPlain("## [1.0.0]\n\n- item\n\n## [0.9.0]"),
+			);
+		});
+
+		it("hides multi-line and unclosed comments", () => {
+			assert.deepStrictEqual(renderPlain("<!--\nmulti\nline\n-->\ntext"), renderPlain("text"));
+			assert.deepStrictEqual(renderPlain("text\n\n<!-- streaming"), renderPlain("text"));
+		});
+
+		it("hides comments in blockquotes and list items", () => {
+			assert.deepStrictEqual(
+				renderPlain("> q\n>\n> <!-- c -->\n>\n> r\n\n- a\n\n  <!-- c -->\n\n  b\n- <!-- c --> item"),
+				renderPlain("> q\n>\n> r\n\n- a\n\n  b\n- item"),
+			);
+		});
+
+		it("keeps other HTML and the text after a comment in a block", () => {
+			assert.deepStrictEqual(renderPlain("with <tag> markers"), ["with <tag> markers"]);
+			assert.deepStrictEqual(renderPlain("<!-- c --> trailing text"), ["trailing text"]);
+			assert.deepStrictEqual(renderPlain("<div>\n<!-- c -->a</div>"), ["<div>", "a</div>"]);
 		});
 	});
 

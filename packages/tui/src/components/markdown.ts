@@ -222,6 +222,36 @@ function hasUnterminatedFence(token: Token): boolean {
 	return closing === undefined || closing[0] !== opening[0] || closing.length < opening.length;
 }
 
+// An unclosed comment runs to the end of an HTML block, as in CommonMark, so streamed comments stay hidden.
+const HTML_COMMENT_REGEX = /<!--[\s\S]*?(?:-->|$)/g;
+
+function stripHtmlComments(html: string): string {
+	return html.replace(HTML_COMMENT_REGEX, "");
+}
+
+/**
+ * Remove block HTML tokens that hold only comments, so they render no line. A removed comment between two blank
+ * lines, or at the start or end, also drops a blank line, so it leaves no extra gap.
+ * See https://github.com/earendil-works/pi/issues/11710.
+ */
+function removeHtmlCommentBlocks(tokens: Token[]): void {
+	for (let i = tokens.length - 1; i >= 0; i--) {
+		const token = tokens[i];
+		if (token.type === "list") {
+			for (const item of token.items) removeHtmlCommentBlocks(item.tokens);
+		} else if (token.type === "blockquote") {
+			removeHtmlCommentBlocks(token.tokens ?? []);
+		} else if (token.type === "html" && stripHtmlComments(token.raw).trim() === "") {
+			tokens.splice(i, 1);
+			if (tokens[i]?.type === "space" && (i === 0 || tokens[i - 1]?.type === "space")) {
+				tokens.splice(i, 1);
+			} else if (i === tokens.length && tokens[i - 1]?.type === "space") {
+				tokens.splice(--i, 1);
+			}
+		}
+	}
+}
+
 const markdownParser = new Marked();
 markdownParser.setOptions({
 	tokenizer: new MarkdownTokenizer(),
@@ -315,9 +345,8 @@ interface StreamedTokens {
 	source: string;
 	tokens: Token[];
 	frozenCount: number;
+	/** Source length of the frozen prefix. Measured before comments are dropped, so it stays exact. */
 	frozenOffset: number;
-	/** The frozen prefix contains raw HTML, which can change how the tail's inline content parses. */
-	frozenHasHtml: boolean;
 }
 
 /** Rendered lines of one top-level token, reused while its rendering inputs are unchanged. */
@@ -438,22 +467,29 @@ export class Markdown implements Component {
 			// A definition in the tail resolves references in the frozen prefix, which would keep stale
 			// inline tokens. Only newly defined links matter here, not references to them.
 			if (Object.keys(tail.links).length === 0) {
+				// The boundary is measured before the tail is cleaned, and only the tail is cleaned: the
+				// frozen prefix holds no HTML token (see {@link streamedPrefix}), so nothing in it is
+				// dropped and walking the whole token list would only cost time on every frame.
+				const prefix = this.streamedPrefix(streamed, tail);
 				const tokens = streamed.tokens.slice(0, streamed.frozenCount);
+				removeHtmlCommentBlocks(tail);
 				for (const token of tail) {
 					tokens.push(token);
 				}
 				trimPartialClosingFences(tokens);
 				this.hasLinkDefinitions = false;
-				this.rememberStreamedTokens(source, tokens);
+				this.rememberStreamedTokens(source, tokens, prefix);
 				return tokens;
 			}
 		}
 
 		const parsed = markdownParser.lexer(source);
 		trimPartialClosingFences(parsed);
+		const prefix = this.streamedPrefix(undefined, parsed);
+		removeHtmlCommentBlocks(parsed);
 		this.cachedTokens = new WeakRef({ source, tokens: parsed });
 		this.hasLinkDefinitions = Object.keys(parsed.links).length > 0;
-		this.rememberStreamedTokens(source, parsed);
+		this.rememberStreamedTokens(source, parsed, prefix);
 		return parsed;
 	}
 
@@ -461,38 +497,53 @@ export class Markdown implements Component {
 	private canReuseStreamedTokens(streamed: StreamedTokens, source: string): boolean {
 		return (
 			!this.hasLinkDefinitions &&
-			!streamed.frozenHasHtml &&
-			!source.includes("\r") &&
 			source.length > streamed.source.length &&
 			// Slicing and comparing beats startsWith here: this runs on every streamed frame, and
 			// startsWith walks the whole frozen prefix (hundreds of KB) character by character.
-			source.slice(0, streamed.source.length) === streamed.source
+			source.slice(0, streamed.source.length) === streamed.source &&
+			// The frozen prefix is known to have none; only the appended text can add one.
+			source.indexOf("\r", streamed.source.length) === -1
 		);
 	}
 
 	/**
-	 * Record where the parsed tokens became final. Only the trailing tokens can change when the source
-	 * grows, so the rest of the parse is kept as the prefix for the next update.
+	 * The prefix that the next update will not re-lex: `count` tokens covering `offset` characters of
+	 * the source. The offset is summed from the uncleaned tokens, because `removeHtmlCommentBlocks()`
+	 * drops tokens whose raw text stays in the source; a frozen prefix holds no HTML token, so nothing
+	 * in it is ever dropped.
 	 */
-	private rememberStreamedTokens(source: string, tokens: Token[]): void {
-		const frozenCount = Math.max(0, tokens.length - STREAMED_TAIL_MARGIN);
-		// Without an incremental consumer the cache would only retain tokens, and line endings would
-		// break the offsets because the lexer normalizes them.
-		if (!this.isIncremental() || frozenCount < 1 || source.includes("\r")) {
-			this.streamedTokens = undefined;
-			return;
+	private streamedPrefix(
+		streamed: StreamedTokens | undefined,
+		tail: Token[],
+	): { count: number; offset: number } | undefined {
+		const frozenTail = Math.max(0, tail.length - STREAMED_TAIL_MARGIN);
+		const count = (streamed?.frozenCount ?? 0) + frozenTail;
+		// Without an incremental consumer the cache would only retain tokens.
+		if (!this.isIncremental() || count < 1) return undefined;
+		let offset = streamed?.frozenOffset ?? 0;
+		for (let i = 0; i < frozenTail; i++) {
+			const token = tail[i]!;
+			// An HTML block can absorb the lines that follow it, so appending can change how it parses,
+			// and a comment dropped from it would stop the frozen tokens' raw text from adding up to the
+			// source. A carriage return breaks that sum too, because the lexer normalizes line endings.
+			if (token.type === "html" || token.raw.includes("\r")) return undefined;
+			offset += token.raw.length;
 		}
-		let frozenOffset = 0;
-		for (let i = 0; i < frozenCount; i++) {
-			frozenOffset += tokens[i].raw.length;
-		}
-		this.streamedTokens = {
-			source,
-			tokens,
-			frozenCount,
-			frozenOffset,
-			frozenHasHtml: source.slice(0, frozenOffset).includes("<"),
-		};
+		return { count, offset };
+	}
+
+	/**
+	 * Keep the parse for the next update. Only the trailing tokens can change when the source grows,
+	 * so everything before {@link streamedPrefix}'s boundary is reused as is.
+	 */
+	private rememberStreamedTokens(
+		source: string,
+		tokens: Token[],
+		prefix: { count: number; offset: number } | undefined,
+	): void {
+		this.streamedTokens = prefix
+			? { source, tokens, frozenCount: prefix.count, frozenOffset: prefix.offset }
+			: undefined;
 	}
 
 	render(width: number): string[] {
@@ -876,9 +927,9 @@ export class Markdown implements Component {
 				break;
 
 			case "html":
-				// Render HTML as plain text (escaped for terminal)
+				// Render HTML as plain text (escaped for terminal), without its comments
 				if ("raw" in token && typeof token.raw === "string") {
-					lines.push(this.applyDefaultStyle(token.raw.trim()));
+					lines.push(this.applyDefaultStyle(stripHtmlComments(token.raw).trim()));
 				}
 				break;
 
@@ -906,7 +957,15 @@ export class Markdown implements Component {
 			return segments.map((segment: string) => applyText(segment)).join("\n");
 		};
 
-		for (const token of tokens) {
+		// After a skipped HTML comment, drop the next text's leading space if the text before ended with one,
+		// so "a <!-- c --> b" renders as "a b".
+		let dropLeadingSpace = false;
+		for (let i = 0; i < tokens.length; i++) {
+			let token = tokens[i];
+			if (dropLeadingSpace && token.type === "text" && !token.tokens?.length && /^[ \t]/.test(token.text)) {
+				token = { ...token, text: token.text.replace(/^[ \t]+/, "") };
+			}
+			dropLeadingSpace = false;
 			switch (token.type) {
 				case "latex": {
 					const latexToken = token as LatexToken;
@@ -985,8 +1044,10 @@ export class Markdown implements Component {
 				}
 
 				case "html":
-					// Render inline HTML as plain text
-					if ("raw" in token && typeof token.raw === "string") {
+					// Render inline HTML as plain text; comments are hidden
+					if (token.raw.startsWith("<!--")) {
+						dropLeadingSpace = i === 0 || /[ \t]$/.test(tokens[i - 1].raw);
+					} else {
 						result += applyTextWithNewlines(token.raw);
 					}
 					break;
