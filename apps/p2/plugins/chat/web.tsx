@@ -23,6 +23,7 @@ import {
 	CostPanel,
 	closeLayers,
 	conversationRoute,
+	type Detail,
 	DownIcon,
 	errorText,
 	type FileCompletion,
@@ -37,6 +38,7 @@ import {
 	keptSizes,
 	knownMain,
 	LockIcon,
+	lightTap,
 	loadKept,
 	locationLabel,
 	MenuIcon,
@@ -214,11 +216,34 @@ const attachingOf = ({ files, setFiles, addFiles }: ReturnType<typeof useCompose
 });
 
 /**
+ * The page-wide objects the conversation screens read, held once by `Main`: a screen is keyed by its conversation, so
+ * holding them in it would hold them anew, and receive their whole state again, at every switch.
+ */
+type PageObjects = {
+	readonly sessions: Held<typeof Sessions> | undefined;
+	readonly access: Held<typeof Access> | undefined;
+	readonly subagents: Held<typeof Subagents> | undefined;
+	readonly status: Held<typeof SessionStatus> | undefined;
+	/** The owner's only. */
+	readonly models: Held<typeof Models> | undefined;
+	/** The owner's only. */
+	readonly envs: Held<typeof Envs> | undefined;
+};
+
+const PageObjectsContext = createContext<PageObjects | undefined>(undefined);
+
+function usePageObjects(): PageObjects {
+	const objects = useContext(PageObjectsContext);
+	if (objects === undefined) throw new Error("usePageObjects outside Main");
+	return objects;
+}
+
+/**
  * The owner's model catalog and settings, with the default model as just chosen: `setDefault` shows the choice as the
  * default at once (the picker's mark) and rolls back if the server refuses it.
  */
-function useModelResources(owner: boolean, fail: (error: unknown) => void) {
-	const models = useObject(Models, owner ? {} : undefined);
+function useModelResources(fail: (error: unknown) => void) {
+	const { models } = usePageObjects();
 	const [resources, guess] = useOptimisticCall(
 		useReadable(models?.resources),
 		(snapshot, choice: ModelChoice) =>
@@ -235,6 +260,35 @@ function useModelResources(owner: boolean, fail: (error: unknown) => void) {
 			);
 	};
 	return [resources, setDefault] as const;
+}
+
+/** Where this device remembers settings.json's `detail` (the owner's), for the moment before the settings arrive. */
+const DETAIL_KEY = "p2-detail";
+const detailOf = (value: unknown): Detail | undefined =>
+	value === 1 || value === 2 || value === 3 || value === 4 ? value : undefined;
+
+/**
+ * settings.json's `detail` (undefined: the default): from the owner's settings once they arrive, and until then (each
+ * chat holds them anew, a page loads) as this device last saw it, so a chat opens laid out as it will stay instead of
+ * regrouping its turns a moment later.
+ */
+function useDetail(resources: ResourceSnapshot | undefined): Detail | undefined {
+	// null: the settings arrived and name no level (the default).
+	const known = resources ? (detailOf(resources.settings.detail) ?? null) : undefined;
+	useEffect(() => {
+		if (known === undefined) return;
+		try {
+			localStorage.setItem(DETAIL_KEY, known === null ? "" : String(known));
+		} catch {
+			// Storage unavailable (private mode): only this page's later chats lose it.
+		}
+	}, [known]);
+	if (known !== undefined) return known ?? undefined;
+	try {
+		return detailOf(Number(localStorage.getItem(DETAIL_KEY)));
+	} catch {
+		return undefined;
+	}
 }
 
 /** The model and thinking chip that opens the model sheet. */
@@ -551,8 +605,8 @@ function TopBar({
 	const connected = useConnected();
 	const nav = useNavigation();
 	const route = useRoute();
-	// Only the owner reads environments: guests see the location without the sandbox lock.
-	const envs = useReadable(useObject(Envs, owner ? {} : undefined)?.envs);
+	// Only the owner reads environments (`PageObjects.envs`): guests see the location without the sandbox lock.
+	const envs = useReadable(usePageObjects().envs?.envs);
 	const sandboxed = envs?.find((env) => env.name === session?.env)?.config.type === "gondolin";
 	const lock = sandboxed && (
 		<span className="title-lock">
@@ -712,8 +766,9 @@ function SessionChat({ sessionId, conversationId }: { sessionId: string; convers
 	);
 	const connected = useConnected();
 	const host = useHost();
+	const objects = usePageObjects();
 	// The catalog as the owner or a guest sees it (`worker` is a session worker's).
-	const sessions = liveIn(useObject(Sessions, {}), "owner", "guest");
+	const sessions = liveIn(objects.sessions, "owner", "guest");
 	const listed = useReadable(sessions?.sessions);
 	const session = listed?.find((entry) => entry.id === sessionId);
 	// A session archived or removed elsewhere while viewed: the new-session screen replaces it, and the toast says why
@@ -729,7 +784,7 @@ function SessionChat({ sessionId, conversationId }: { sessionId: string; convers
 		}
 	}, [listed, session, nav, sessionId, toast]);
 	// Who this browser is, as the server last said: kept while reconnecting (`useOwner`), so the composer stays.
-	const access = useObject(Access, {});
+	const { access } = objects;
 	const liveGrant = useReadable(liveIn(access, "guest")?.grant);
 	const owner = useOwner();
 	const lastGrant = useRef(liveGrant);
@@ -737,8 +792,8 @@ function SessionChat({ sessionId, conversationId }: { sessionId: string; convers
 	if (useStatus(access) === "live") lastGrant.current = liveGrant;
 	const grant = owner ? undefined : lastGrant.current;
 	const { fail } = useComposerState();
-	const [resources, setDefault] = useModelResources(owner, fail);
-	const subagents = liveIn(useObject(Subagents, {}), "reader");
+	const [resources, setDefault] = useModelResources(fail);
+	const subagents = liveIn(objects.subagents, "reader");
 	const children = useReadable(subagents?.children);
 	const child = children?.[sessionId]?.find((entry) => entry.conversationId === conversationId);
 	// A code mode script's one-shot agent: read-only, opened from the script's tool card.
@@ -770,7 +825,7 @@ function SessionChat({ sessionId, conversationId }: { sessionId: string; convers
 		)
 			void nav.replace(conversationRoute(current, sessionId, main), current);
 	}, [children, child, conversationId, main, nav, sessionId]);
-	const workers = liveIn(useObject(SessionStatus, {}), "reader");
+	const workers = liveIn(objects.status, "reader");
 	const workerError = useReadable(workers?.statuses)?.[sessionId]?.error;
 	const [activationError, setActivationError] = useState<string>();
 	const failure = workerError ?? activationError;
@@ -977,19 +1032,10 @@ function SessionChat({ sessionId, conversationId }: { sessionId: string; convers
 	// How tools' calls show: contributed by the plugins that own them.
 	const tools = useRegistry(ToolActivities);
 	// How much of a turn the transcript shows (settings.json `detail`, the owner's; guests see the default).
-	const detail = resources?.settings.detail;
+	const detail = useDetail(resources);
 	const rows = useMemo(
-		() =>
-			shown
-				? transcriptRows(
-						shown.items,
-						tools,
-						shown.working,
-						known,
-						// Anything else: the default (`transcriptRows`' `DEFAULT_DETAIL`).
-						detail === 1 || detail === 2 || detail === 3 || detail === 4 ? detail : undefined,
-					)
-				: undefined,
+		// Anything else: the default (`transcriptRows`' `DEFAULT_DETAIL`).
+		() => (shown ? transcriptRows(shown.items, tools, shown.working, known, detail) : undefined),
 		[shown, tools, known, detail],
 	);
 	const follow = useChatScroll({
@@ -1020,6 +1066,7 @@ function SessionChat({ sessionId, conversationId }: { sessionId: string; convers
 	const send = () => {
 		const text = draft.trim();
 		if ((!text && !files.length) || !canWrite) return;
+		lightTap();
 		setStopped(undefined);
 		const id = crypto.randomUUID();
 		outbox.add({
@@ -1497,11 +1544,11 @@ function NewSession() {
 	const connected = useConnected();
 	const host = useHost();
 	const owner = useOwner();
-	const catalog = useObject(Sessions, {});
+	const catalog = usePageObjects().sessions;
 	const listed = useReadable(liveIn(catalog, "owner", "guest")?.sessions);
 	// Only the owner creates sessions.
 	const sessions = liveIn(catalog, "owner");
-	const [resources, setDefault] = useModelResources(owner, useComposerState().fail);
+	const [resources, setDefault] = useModelResources(useComposerState().fail);
 	const recent = useMemo(() => (listed ?? []).toSorted((a, b) => b.updatedAt - a.updatedAt), [listed]);
 	const { location: selectedLocation, setLocation, choice: selectedChoice, setChoice } = useNewSessionState();
 	const location =
@@ -1535,6 +1582,7 @@ function NewSession() {
 			openLayer({ kind: "sheet", name: "model" });
 			return;
 		}
+		lightTap();
 		setStopped(undefined);
 		const id = crypto.randomUUID();
 		sessionStart.add(
@@ -1714,7 +1762,17 @@ function Main() {
 	const nav = useNavigation();
 	const route = useRoute();
 	const ended = useShareEnded();
+	const owner = useOwner();
 	const access = useObject(Access, {});
+	const sessions = useObject(Sessions, {});
+	const subagents = useObject(Subagents, {});
+	const status = useObject(SessionStatus, {});
+	const models = useObject(Models, owner ? {} : undefined);
+	const envs = useObject(Envs, owner ? {} : undefined);
+	const objects = useMemo(
+		() => ({ sessions, access, subagents, status, models, envs }),
+		[sessions, access, subagents, status, models, envs],
+	);
 	const grant = useReadable(liveIn(access, "guest")?.grant);
 	// A guest stays within the sessions shared with it; anywhere else it lands in the one shared or joined last.
 	useEffect(() => {
@@ -1735,26 +1793,28 @@ function Main() {
 	}, [route, shownConversation, nav]);
 	const conversation = route.session && `${route.session}:${shownConversation}`;
 	return (
-		<ChatFrame.Provider value={frame}>
-			{ended ? (
-				<ShareEnded />
-			) : route.session ? (
-				<Slot name="chat-content">
-					<Slot name="chat-attribution">
-						<SessionChat key={conversation} sessionId={route.session} conversationId={shownConversation} />
+		<PageObjectsContext.Provider value={objects}>
+			<ChatFrame.Provider value={frame}>
+				{ended ? (
+					<ShareEnded />
+				) : route.session ? (
+					<Slot name="chat-content">
+						<Slot name="chat-attribution">
+							<SessionChat key={conversation} sessionId={route.session} conversationId={shownConversation} />
+						</Slot>
 					</Slot>
-				</Slot>
-			) : (
-				<NewSession />
-			)}
-			{/* The transcript of the screen above goes into the view (`useChatScreen`), the dock floats over its bottom. */}
-			<div className="chat">
-				<div className="chat-view" ref={setView} />
-				<Dock frame={frame} dockRef={setDock} />
-			</div>
-			{/* Below the chat, per conversation (the bottom terminal panel). */}
-			{conversation && !ended && <Slot key={conversation} name="chat-bottom" />}
-		</ChatFrame.Provider>
+				) : (
+					<NewSession />
+				)}
+				{/* The transcript of the screen above goes into the view (`useChatScreen`), the dock floats over its bottom. */}
+				<div className="chat">
+					<div className="chat-view" ref={setView} />
+					<Dock frame={frame} dockRef={setDock} />
+				</div>
+				{/* Below the chat, per conversation (the bottom terminal panel). */}
+				{conversation && !ended && <Slot key={conversation} name="chat-bottom" />}
+			</ChatFrame.Provider>
+		</PageObjectsContext.Provider>
 	);
 }
 

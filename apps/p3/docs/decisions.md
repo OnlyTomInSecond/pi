@@ -54,3 +54,64 @@ and its working rules are in `handoff.md`.
   addressable things, groupings and views is the point and must allow free composition, also where the terminal cannot
   show all of it; access control (which resources a project or session may use, who may see or do what) must attach to
   the same model later, not be designed separately.
+- **No per-run authority; what is brought into a session is the control (owner, 2026-11-08: "there is no point in trying
+  to prevent prompt injections. that's why one should be able to define what is brought into a session"):** everyone
+  who may send in a session uses every resource in its selection, whoever started the run (as decided earlier: `origin`
+  is out, illusory against prompt injection). The stress test's "authority per run" gap (`model-stress/report.md`, both
+  reviews) is dropped; defining a session's resources (projects, lock-down, what is brought in) is the mechanism.
+- **Resource model direction (owner, 2026-11-08, voice walkthrough; to be specified and reviewed against p2's
+  features, then explained):** users (including a reserved instance user for company resources); resources, each owned
+  by one user, with its own login or none, never changing whose login it uses (Cristina's own Radius login is her own
+  resource); users create resources only for themselves, admins for the instance user; plugins create their built-in
+  resources (tools, prompt sections: one Durable extension = one resource) for the instance user when installed.
+  Groupings are plugin-defined and only show things (any number per session, computed like folders/recent or curated
+  like projects); a grouping "with resources" keeps its own resource list in its own plugin and tells core how to read
+  it; a session has exactly one resource source: its own list, its owner's defaults (the rule "everything I own plus
+  every instance resource I may use", so new tools appear by themselves) or one grouping with resources (one field on
+  the session: the invariant is structural). Everyone who may send in a session uses its whole list (no per-run
+  authority). One replaceable policy plugin (a registry with one provider; built-in default: the single user may do
+  everything) guards create, bring, add-member and similar typed operations through one guarded step in core; plugins
+  never know about ACL, SAML or Radius; the UI only renders server views (e.g. a per-user list of creatable kinds
+  computed with the policy). Workers follow their session's list live; the harness lets in only extensions whose
+  resource is on it (and belongs to the contributing plugin); resource plugins' per-session server views check the list.
+  Configured resources cover fine-grained cases (conversation access to one session with chosen actions, expiring list
+  entries). Rendering: renderers per contract and form (row, card, detail, ...) from any plugin, detail views assembled
+  from panels several plugins contribute. No stringly-typed APIs.
+- **Session metadata store on the server (owner, 2026-11-09, voice):** a session's data lives in one of two places, and
+  a plugin picks one per fact. (1) The **session metadata store** on the server, provided by the base: everything about
+  a session that is needed while its worker is not running (title, pin, archive, location, a Discord channel binding, a
+  plugin's labels or settings for that session). Any plugin writes to it under its own typed key per session (a token
+  defined once in its contract file with a name and a schema, like `defineState`); server code reads and writes it by
+  session id without starting the worker; the worker reads its own session's metadata through a view and writes through
+  server methods (one writer: the server). A rename is one server write. (2) The **session's own store**: everything
+  only used while the worker runs (transcript, Durable state, a plugin's working data). Never keep the same fact in
+  both. Export of one session = its store plus its entries in the metadata store; import writes both back and resolves
+  references to instance things (environment, providers). Sessions stay self-contained as a unit; no tagging of
+  arbitrary tables, no pending edits. Replaces the split proposed on PR #11951 (comment 6737930304).
+- **Backups, not session sync; one format (owner, 2026-11-09, voice):** no per-session sync and no synced read-only
+  copies elsewhere (a session without its instance, its environments, providers and plugins, is useless; the use case
+  is working with a session, never reading it remotely). Radius offers whole-instance backups (the server store and all
+  session stores together) and restore onto a new machine. The **sync format** of Chord's stores stays the one format
+  for both backups and exports (a single session's export: its store plus its session metadata entries): it encodes
+  every kind of data the core stores hold, plugin data included, and we bet on it.
+- **Session data on the server as host-keyed documents (owner, 2026-11-09, supersedes the typed metadata store of the
+  "Session metadata store" entry):** each plugin keeps its per-session server data in its own server object as Chord
+  documents or table rows keyed by the session's host address (`defineState(..., { keyed: Session })`, table columns
+  `host(Session)`; Chord decision "Documents and table rows can belong to a host"); its worker part follows its own
+  document through its own view (pinned with `at(Session({ id: principal.session }))`). Export of a session = its own
+  store + every server record and row belonging to its address, in the store archive format; import into a non-empty
+  store refuses, replaces explicitly, or copies under a new id; delete retires them. The rule stays: anything needed
+  while the worker is off lives on the server, the rest in the session's store, never both. No central metadata store,
+  no `metadataOf`, no export callbacks.
+- **Efficiency is a requirement (owner, 2026-11-09):** p3 must be extremely efficient: dozens to hundreds of session
+  workers on one reasonably beefy machine, and a super snappy UI. Every design and build step states its memory per
+  worker, its startup cost and its bytes on the wire for common UI actions (switching sessions and conversations),
+  and measures them; findings of p2's perf work (session "fucked up perf", subagent `worker-mem`) feed p3's design.
+  Any Chord change made for performance (for example references sharing or keeping replicas) must keep Chord's
+  correctness guarantees and goes through the full review.
+- **Tests are isolated and deterministic (owner, 2026-11-09, after p2's subagents test race):** each test case gets its
+  own session (and its own subagents, conversations and stores); nothing a case leaves behind is visible to the next.
+  The fake model answers what the test scripted for each request, deterministically, never "whatever came last"; a
+  request it has no script for fails the test. A test waits for an effect it caused (an entry newer than its own input,
+  a result of its own call), never for a pattern that may already be there. A failure under load is a bug until its
+  root cause is known.
