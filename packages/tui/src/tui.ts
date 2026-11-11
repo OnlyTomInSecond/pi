@@ -443,20 +443,25 @@ export class Container implements Component {
 
 	render(width: number): string[] {
 		const previous = this.renderState;
-		let unchanged =
+		const sameChildren =
 			previous !== undefined && previous.width === width && previous.childLines.length === this.children.length;
 		const childLines: string[][] = new Array(this.children.length);
 		const heights: number[] = new Array(this.children.length);
+		// Index of the first child whose lines changed, or -1 while every child returned its last array.
+		let firstChanged = sameChildren ? -1 : 0;
+		let unchangedLines = 0;
 		for (let index = 0; index < this.children.length; index++) {
 			const lines = this.children[index]!.render(width);
 			childLines[index] = lines;
 			heights[index] = lines.length;
-			if (unchanged && previous!.childLines[index] !== lines) unchanged = false;
+			if (firstChanged === -1 && previous!.childLines[index] !== lines) firstChanged = index;
+			if (firstChanged === -1) unchangedLines += lines.length;
 		}
-		if (unchanged) return previous!.lines;
-		const lines: string[] = [];
-		for (const childLinesOfChild of childLines) {
-			for (const line of childLinesOfChild) {
+		if (firstChanged === -1) return previous!.lines;
+		// Only the children from the first changed one on have to be copied into the new frame.
+		const lines = sameChildren ? previous!.lines.slice(0, unchangedLines) : [];
+		for (let index = firstChanged; index < childLines.length; index++) {
+			for (const line of childLines[index]!) {
 				lines.push(line);
 			}
 		}
