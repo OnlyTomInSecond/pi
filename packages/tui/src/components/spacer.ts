@@ -5,6 +5,11 @@ import type { Component } from "../tui.ts";
  */
 export class Spacer implements Component {
 	private lines: number;
+	/**
+	 * Last empty lines, returned again unchanged. Renderers reuse a container's frame while its children
+	 * return the same array, and spacers sit in most message components.
+	 */
+	private last?: string[];
 
 	constructor(lines: number = 1) {
 		this.lines = lines;
@@ -15,14 +20,11 @@ export class Spacer implements Component {
 	}
 
 	invalidate(): void {
-		// No cached state to invalidate currently
+		this.last = undefined;
 	}
 
 	render(_width: number): string[] {
-		const result: string[] = [];
-		for (let i = 0; i < this.lines; i++) {
-			result.push("");
-		}
-		return result;
+		if (this.last?.length !== this.lines) this.last = new Array<string>(this.lines).fill("");
+		return this.last;
 	}
 }
