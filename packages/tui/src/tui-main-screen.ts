@@ -469,11 +469,11 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 			output.flush();
 			this.cursorRow = Math.max(0, totalLines - 1);
 			this.hardwareCursorRow = this.cursorRow;
-			// Reset max lines when clearing the scrollback, otherwise track growth
-			if (mode === "all") {
-				this.maxLinesRendered = totalLines;
-			} else {
+			// A repaint starts from a cleared screen, so it cannot leave stale rows behind.
+			if (mode === "first") {
 				this.maxLinesRendered = Math.max(this.maxLinesRendered, totalLines);
+			} else {
+				this.maxLinesRendered = totalLines;
 			}
 			const bufferLength = mode === "window" ? totalLines : Math.max(height, totalLines);
 			this.previousViewportTop = Math.max(0, bufferLength - height);
@@ -530,12 +530,12 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 			return;
 		}
 
-		// Content shrunk below the working area and no overlays - re-render to clear empty rows
+		// Content shrunk below the working area and no overlays - repaint to clear empty rows
 		// (overlays need the padding, so only do this when no overlays are active)
 		// Configurable via setClearOnShrink()
 		if (this.getClearOnShrink() && totalLines < this.maxLinesRendered && !this.hasOverlayEntries) {
 			logRedraw(`clearOnShrink (maxLinesRendered=${this.maxLinesRendered})`);
-			fullRender("all");
+			fullRender("window");
 			return;
 		}
 

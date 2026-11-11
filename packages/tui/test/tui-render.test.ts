@@ -660,8 +660,7 @@ describe("TUI content shrinkage", () => {
 		tui.requestRender();
 		await terminal.waitForRender();
 
-		// Should have triggered a full redraw to clear empty rows
-		assert.ok(tui.fullRedraws > initialRedraws, "Content shrinkage should trigger full redraw");
+		assert.strictEqual(tui.fullRedraws, initialRedraws, "shrinking repaints the window, not the scrollback");
 
 		const viewport = terminal.getViewport();
 		assert.ok(viewport[0]?.includes("Line 0"), "First line preserved");
