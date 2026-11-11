@@ -69,7 +69,7 @@ describe("TuiMainScreen scroll preservation", () => {
 		);
 	});
 
-	it("replays the transcript when a change above the viewport only restyles it", async () => {
+	it("repaints from the viewport top when a change above it only restyles the transcript", async () => {
 		const styled = (palette: number): string[] =>
 			Array.from({ length: 20 }, (_, index) => `\x1b[48;5;${palette}ml${index}         \x1b[49m`);
 		const terminal = new CapturingTerminal(40, 10);
@@ -81,21 +81,20 @@ describe("TuiMainScreen scroll preservation", () => {
 		await terminal.flush();
 
 		const redraws = tui.fullRedraws;
-		// A finished tool block repaints every row it covers. Rows above the viewport are in scrollback
-		// and only the replay can still reach them.
+		// A finished tool block repaints every row it covers. Only the visible rows follow; the
+		// scrollback above keeps the style it was written with instead of replaying the transcript.
 		live.lines = styled(22);
 		tui.renderNow();
 		await terminal.flush();
 
-		assert.strictEqual(tui.fullRedraws, redraws + 1, "style-only change above the viewport must replay");
+		assert.strictEqual(tui.fullRedraws, redraws, "no scrollback replay for restyled rows");
 		assert.ok(
-			terminal.getScrollBuffer().some((line) => line.includes("l0")),
-			"transcript stays in the buffer",
+			terminal.getViewport().some((line) => line.includes("l19")),
+			"the transcript end stays visible",
 		);
-		assert.ok(terminal.writes.join("").includes("\x1b[48;5;22ml0"), "rows above the viewport get the new style");
 	});
 
-	it("replays the transcript when the content ends above the viewport top", async () => {
+	it("keeps the scrollback and repaints the last screenful when the content end goes above the viewport", async () => {
 		const terminal = new VirtualTerminal(40, 10);
 		const tui = new TuiMainScreen(terminal);
 		tui.setCommittedComponent(new LinesComponent(Array.from({ length: 20 }, (_, index) => `c${index}`)));
@@ -106,12 +105,13 @@ describe("TuiMainScreen scroll preservation", () => {
 		await terminal.flush();
 
 		const redraws = tui.fullRedraws;
-		// A tall block collapses: the rows above the viewport are gone and the terminal cannot scroll back.
+		// A tall block collapses: the rows above the viewport are gone and the terminal cannot scroll
+		// back to them, so the last screenful is repainted over the cleared screen.
 		live.lines = live.lines.slice(0, 3);
 		tui.renderNow();
 		await terminal.flush();
 
-		assert.strictEqual(tui.fullRedraws, redraws + 1, "a shrunken transcript must be replayed");
+		assert.strictEqual(tui.fullRedraws, redraws, "the scrollback is kept");
 		const viewport = terminal.getViewport().map((line) => line.trimEnd());
 		assert.deepStrictEqual(viewport.slice(-3), ["l2", "editor", "footer"], "end of the transcript stays visible");
 	});

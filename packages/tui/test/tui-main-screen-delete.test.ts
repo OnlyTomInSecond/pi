@@ -78,7 +78,7 @@ describe("TuiMainScreen deleted lines", () => {
 		}
 	});
 
-	it("clears removed rows without scrolling the terminal", async () => {
+	it("re-anchors the screen to the content end when a row is removed", async () => {
 		const terminal = new CapturingTerminal(20, 6);
 		const tui = new TuiMainScreen(terminal);
 		const live = new LinesComponent(renderLines(10));
@@ -97,13 +97,13 @@ describe("TuiMainScreen deleted lines", () => {
 		await assertScreenMatchesModel(tui, terminal, "after shrinking one row");
 		assert.deepStrictEqual(
 			(await terminal.flushAndGetViewport()).map(strip).slice(-1),
-			[""],
-			"the row that held the removed line is cleared",
+			["row-08"],
+			"the content end stays on the last screen row",
 		);
 		assert.ok(written.length > 0, "the frame still writes");
 	});
 
-	it("truncating the transcript stays incremental and keeps the remaining rows", async () => {
+	it("truncating the transcript keeps the content end on screen without clearing scrollback", async () => {
 		const terminal = new VirtualTerminal(20, 6);
 		const tui = new TuiMainScreen(terminal);
 		const live = new LinesComponent(renderLines(12));
@@ -119,9 +119,9 @@ describe("TuiMainScreen deleted lines", () => {
 
 		assert.strictEqual(tui.fullRedraws, fullRedraws, "truncation must not clear the scrollback");
 		assert.deepStrictEqual(
-			(await terminal.flushAndGetViewport()).map(strip).slice(0, 1),
-			["row-06"],
-			"the remaining content stays on screen",
+			(await terminal.flushAndGetViewport()).map(strip),
+			renderLines(7).slice(1),
+			"the last screenful of the remaining content stays on screen",
 		);
 	});
 });

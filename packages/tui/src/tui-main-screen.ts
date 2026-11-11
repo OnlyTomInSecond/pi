@@ -61,55 +61,6 @@ function isTermuxSession(): boolean {
 	return Boolean(process.env.TERMUX_VERSION);
 }
 
-/**
- * Index after the SGR sequence starting at `index`, or `-1` when the bytes there are not an SGR sequence.
- * Only SGR (`CSI ... m`) is styling: any other escape sequence carries content the terminal shows.
- */
-function sgrEnd(line: string, index: number): number {
-	let i = index + 2;
-	while (i < line.length) {
-		const code = line.charCodeAt(i);
-		if (code === 0x6d) return i + 1; // "m"
-		if (code < 0x30 || code > 0x3b) return -1; // digits, ";" and ":" only
-		i++;
-	}
-	return -1;
-}
-
-/**
- * Whether two rendered lines show the same text and differ only in SGR styling, such as a tool block
- * switching its background from the pending to the result color.
- */
-function sameTextWithDifferentStyle(before: string, after: string): boolean {
-	let i = 0;
-	let j = 0;
-	let styled = false;
-	while (true) {
-		if (before.charCodeAt(i) === 0x1b && before.charCodeAt(i + 1) === 0x5b) {
-			const end = sgrEnd(before, i);
-			if (end !== -1) {
-				i = end;
-				styled = true;
-				continue;
-			}
-		}
-		if (after.charCodeAt(j) === 0x1b && after.charCodeAt(j + 1) === 0x5b) {
-			const end = sgrEnd(after, j);
-			if (end !== -1) {
-				j = end;
-				styled = true;
-				continue;
-			}
-		}
-		const beforeCode = i < before.length ? before.charCodeAt(i) : -1;
-		const afterCode = j < after.length ? after.charCodeAt(j) : -1;
-		if (beforeCode !== afterCode) return false;
-		if (beforeCode === -1) return styled;
-		i++;
-		j++;
-	}
-}
-
 /** TUI implementation that renders into the terminal's main screen and scrollback. */
 export class TuiMainScreen extends TuiBase implements CommittedTUI {
 	readonly mode = "regular" as const;
@@ -480,14 +431,22 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 				: this.extractCursorPosition(head, height);
 
 		// Helper to clear scrollback and viewport and render all new lines
-		const fullRender = (clear: boolean): void => {
-			this.fullRedrawCount += 1;
-			const renderLines = materialize();
+		const fullRender = (mode: "first" | "all" | "window"): void => {
+			// A window repaint keeps the scrollback, so it is not a full redraw.
+			if (mode !== "window") this.fullRedrawCount += 1;
+			// "window" keeps the scrollback and repaints only the last screenful, which is the cheap
+			// repair when rows above the viewport changed or went away. It reads that window from the
+			// frame directly instead of assembling every line.
+			const firstRow = mode === "window" ? Math.max(0, totalLines - height) : 0;
+			const renderLines =
+				mode === "window"
+					? Array.from({ length: totalLines - firstRow }, (_, offset) => lineAt(firstRow + offset))
+					: materialize();
 			const output = new BoundedTerminalWriter((data) => this.terminal.write(data));
 			output.append("\x1b[?2026h"); // Begin synchronized output
-			if (clear) {
+			if (mode !== "first") {
 				output.append(this.deleteKittyImages(this.previousKittyImageIds));
-				output.append("\x1b[2J\x1b[H\x1b[3J"); // Clear screen, home, then clear scrollback
+				output.append(mode === "window" ? "\x1b[2J\x1b[H" : "\x1b[2J\x1b[H\x1b[3J");
 			}
 			for (let i = 0; i < renderLines.length; i++) {
 				if (i > 0) output.append("\r\n");
@@ -508,18 +467,18 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 			}
 			output.append("\x1b[?2026l"); // End synchronized output
 			output.flush();
-			this.cursorRow = Math.max(0, renderLines.length - 1);
+			this.cursorRow = Math.max(0, totalLines - 1);
 			this.hardwareCursorRow = this.cursorRow;
-			// Reset max lines when clearing, otherwise track growth
-			if (clear) {
-				this.maxLinesRendered = renderLines.length;
+			// Reset max lines when clearing the scrollback, otherwise track growth
+			if (mode === "all") {
+				this.maxLinesRendered = totalLines;
 			} else {
-				this.maxLinesRendered = Math.max(this.maxLinesRendered, renderLines.length);
+				this.maxLinesRendered = Math.max(this.maxLinesRendered, totalLines);
 			}
-			const bufferLength = Math.max(height, renderLines.length);
+			const bufferLength = mode === "window" ? totalLines : Math.max(height, totalLines);
 			this.previousViewportTop = Math.max(0, bufferLength - height);
 			this.hardwareCursorCol = -1;
-			this.positionHardwareCursor(cursorPos, renderLines.length);
+			this.positionHardwareCursor(cursorPos, totalLines);
 			this.recordFrame(head, tail, true);
 			this.previousKittyImageIds = this.collectKittyImageIds(renderLines);
 			this.previousWidth = width;
@@ -538,14 +497,14 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 		// First render - just output everything without clearing (assumes clean screen)
 		if (this.previousLines.length === 0 && !widthChanged && !heightChanged) {
 			logRedraw("first render");
-			fullRender(false);
+			fullRender("first");
 			return;
 		}
 
 		// Width changes always need a full re-render because wrapping changes.
 		if (widthChanged) {
 			logRedraw(`terminal width changed (${this.previousWidth} -> ${width})`);
-			fullRender(true);
+			fullRender("all");
 			return;
 		}
 
@@ -554,7 +513,7 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 		// In that environment, a full redraw causes the entire history to replay on every toggle.
 		if (heightChanged && !isTermuxSession()) {
 			logRedraw(`terminal height changed (${this.previousHeight} -> ${height})`);
-			fullRender(true);
+			fullRender("all");
 			return;
 		}
 
@@ -563,7 +522,7 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 		// Configurable via setClearOnShrink()
 		if (this.getClearOnShrink() && totalLines < this.maxLinesRendered && !this.hasOverlayEntries) {
 			logRedraw(`clearOnShrink (maxLinesRendered=${this.maxLinesRendered})`);
-			fullRender(true);
+			fullRender("all");
 			return;
 		}
 
@@ -619,12 +578,14 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 			return;
 		}
 
-		// The screen no longer shows the end of the content: rows above the viewport top were removed
-		// (a tall block collapsed, a message lost its expanded rows) and the terminal cannot scroll
-		// back to them. Clearing the remaining rows would show them as blank, so replay the transcript.
-		if (totalLines - 1 < prevViewportTop) {
-			logRedraw(`content ended above viewportTop (${totalLines - 1} < ${prevViewportTop})`);
-			fullRender(true);
+		// Rows went away above the viewport (a tall block collapsed, a message lost its expanded rows) and
+		// the terminal cannot scroll back to the content end. Clearing the leftover rows would leave the
+		// screen blank below it, so repaint the last screenful over the cleared screen and keep the
+		// scrollback as it was.
+		const contentEndViewportTop = Math.max(0, totalLines - height);
+		if (prevViewportTop > contentEndViewportTop) {
+			logRedraw(`viewport below the content end (${prevViewportTop} > ${contentEndViewportTop})`);
+			fullRender("window");
 			return;
 		}
 
@@ -638,7 +599,7 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 				const targetRow = Math.max(0, totalLines - 1);
 				if (targetRow < prevViewportTop) {
 					logRedraw(`deleted lines moved viewport up (${targetRow} < ${prevViewportTop})`);
-					fullRender(true);
+					fullRender("window");
 					return;
 				}
 				const lineDiff = computeLineDiff(targetRow);
@@ -649,7 +610,7 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 				const extraLines = previousTotal - totalLines;
 				if (extraLines > height) {
 					logRedraw(`extraLines > height (${extraLines} > ${height})`);
-					fullRender(true);
+					fullRender("window");
 					return;
 				}
 				// Clear the deleted rows that are on screen, from the bottom up. Rows below the last
@@ -687,32 +648,10 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 		// refreshes (theme, width, invalidation) and frames without a committed prefix still need a
 		// full redraw when a change landed above the viewport.
 		if (firstChanged < prevViewportTop) {
-			if (!this.committedComponent || committedRefreshed || rebuild) {
-				logRedraw(`firstChanged < viewportTop (${firstChanged} < ${prevViewportTop})`);
-				fullRender(true);
-				return;
-			}
-			// Rows above the viewport are in terminal scrollback and cannot be rewritten. A text change
-			// there (a reflowing streaming message taller than the screen) only has to reach the
-			// viewport down, so repaint from the viewport top instead of clearing scrollback and
-			// replaying history, which would yank the user back to the bottom while they read it.
-			// A style-only change there (a finished tool block switching its background, which repaints
-			// every row it covers) is visible whenever the user scrolls back, so it does need the replay.
-			const styleLimit = Math.min(prevViewportTop, totalLines);
-			let styleOnly = true;
-			for (let i = firstChanged; i < styleLimit; i++) {
-				const before = this.previousLines[i] ?? "";
-				const after = lineAt(i);
-				if (before !== after && !sameTextWithDifferentStyle(before, after)) {
-					styleOnly = false;
-					break;
-				}
-			}
-			if (styleOnly) {
-				logRedraw(`style-only change above viewportTop (${firstChanged} < ${prevViewportTop})`);
-				fullRender(true);
-				return;
-			}
+			// Rows above the viewport are in terminal scrollback and cannot be rewritten. Repaint from
+			// the viewport top instead of clearing scrollback and replaying history, which would yank
+			// the user back to the bottom while they read it. Scrollback keeps whatever it had: stale
+			// styles after a theme change or a block that changed color, and stale rows after a reflow.
 			firstChanged = Math.min(prevViewportTop, totalLines - 1);
 		}
 
@@ -760,7 +699,7 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 					logRedraw(
 						`kitty image pre-clear would scroll (${imageStartScreenRow} + ${imageReservedRows} > ${height})`,
 					);
-					fullRender(true);
+					fullRender("all");
 					return;
 				}
 

@@ -897,7 +897,7 @@ describe("TUI differential rendering", () => {
 		tui.stop();
 	});
 
-	it("full re-renders when deleted lines move the viewport upward", async () => {
+	it("repaints the last screenful when deleted lines move the viewport upward", async () => {
 		const terminal = new VirtualTerminal(20, 5);
 		const tui: TUI = new TuiMainScreen(terminal);
 		const component = new TestComponent();
@@ -913,13 +913,13 @@ describe("TUI differential rendering", () => {
 		tui.requestRender();
 		await terminal.waitForRender();
 
-		assert.ok(tui.fullRedraws > initialRedraws, "Shrink should trigger a full redraw");
+		assert.strictEqual(tui.fullRedraws, initialRedraws, "the scrollback is kept");
 		assert.deepStrictEqual(terminal.getViewport(), ["Line 2", "Line 3", "Line 4", "Line 5", "Line 6"]);
 
 		tui.stop();
 	});
 
-	it("appends after a shrink without another full redraw once the viewport is reset", async () => {
+	it("appends after a shrink without another repaint once the viewport is reset", async () => {
 		const terminal = new VirtualTerminal(20, 5);
 		const tui: TUI = new TuiMainScreen(terminal);
 		const component = new TestComponent();
@@ -935,7 +935,7 @@ describe("TUI differential rendering", () => {
 		tui.requestRender();
 		await terminal.waitForRender();
 
-		assert.ok(tui.fullRedraws > initialRedraws, "Shrink should reset the viewport with a full redraw");
+		assert.strictEqual(tui.fullRedraws, initialRedraws, "the shrink keeps the scrollback");
 		const redrawsAfterShrink = tui.fullRedraws;
 
 		component.lines = ["Line 0", "Line 1", "Line 2"];
@@ -974,12 +974,9 @@ describe("TUI differential rendering", () => {
 		tui.requestRender();
 		await terminal.waitForRender();
 
-		const redrawsBeforeSwitch = tui.fullRedraws;
 		chat.lines = shortChat;
 		tui.requestRender();
 		await terminal.waitForRender();
-
-		assert.ok(tui.fullRedraws > redrawsBeforeSwitch, "Branch switch should trigger a full redraw");
 
 		const viewport = terminal.getViewport();
 		for (let i = 0; i < 10; i++) {
