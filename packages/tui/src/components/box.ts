@@ -5,6 +5,8 @@ type RenderCache = {
 	childLines: string[];
 	width: number;
 	bgSample: string | undefined;
+	/** Rendered height of every child in this render. */
+	heights: number[];
 	lines: string[];
 };
 
@@ -19,7 +21,6 @@ export class Box implements Component {
 
 	// Cache for rendered output
 	private cache?: RenderCache;
-	private mouseLayout?: { width: number; children: Array<{ component: Component; height: number }> };
 
 	constructor(paddingX = 1, paddingY = 1, bgFn?: (text: string) => string) {
 		this.paddingX = paddingX;
@@ -83,12 +84,11 @@ export class Box implements Component {
 		const contentX = event.x - this.paddingX;
 		if (contentY < 0 || contentX < 0 || contentX >= contentWidth) return undefined;
 
-		const mouseChildren =
-			this.mouseLayout?.width === contentWidth
-				? this.mouseLayout.children
-				: this.children.map((component) => ({ component, height: component.render(contentWidth).length }));
+		const cachedHeights = this.cache?.width === contentWidth ? this.cache.heights : undefined;
 		let childY = 0;
-		for (const { component: child, height: childHeight } of mouseChildren) {
+		for (let index = 0; index < this.children.length; index++) {
+			const child = this.children[index]!;
+			const childHeight = cachedHeights?.[index] ?? child.render(contentWidth).length;
 			if (contentY >= childY && contentY < childY + childHeight) {
 				return dispatchMouseEvent(child, {
 					...event,
@@ -115,15 +115,14 @@ export class Box implements Component {
 		// objects every frame, so the cache check below is a cheap identity comparison per line.
 		// Padding here would create new strings that must be compared character by character.
 		const childLines: string[] = [];
-		const mouseChildren: Array<{ component: Component; height: number }> = [];
+		const heights: number[] = [];
 		for (const child of this.children) {
 			const lines = child.render(contentWidth);
-			mouseChildren.push({ component: child, height: lines.length });
+			heights.push(lines.length);
 			for (const line of lines) {
 				childLines.push(line);
 			}
 		}
-		this.mouseLayout = { width: contentWidth, children: mouseChildren };
 
 		if (childLines.length === 0) {
 			return [];
@@ -157,7 +156,7 @@ export class Box implements Component {
 
 		// Update cache
 		flattenLines(result);
-		this.cache = { childLines, width, bgSample, lines: result };
+		this.cache = { childLines, width, bgSample, heights, lines: result };
 
 		return result;
 	}
