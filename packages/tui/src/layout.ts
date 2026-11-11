@@ -306,25 +306,31 @@ export function getScrollbarGeometry(box: LayoutBox, includeHiddenAuto = false):
 	};
 }
 
-interface PaintedScrollbarCell {
-	line: string;
+interface PaintedScrollbarLine {
 	column: number;
-	replacement: string;
-	painted: string;
+	preserveBackground: boolean;
+	/** Painted line per replacement cell, since the thumb and track cells differ. */
+	byReplacement: Map<string, string>;
 }
 
-/** Last painted scrollbar cell per track row, keyed by the scroll view that owns the scrollbar. */
-const paintedScrollbarCells = new WeakMap<ScrollView, Map<number, PaintedScrollbarCell>>();
+const PAINTED_SCROLLBAR_LINE_LIMIT = 512;
+
+/**
+ * Painted scrollbar lines keyed by their content, so scrolling (the same lines at other rows) and
+ * steady frames reuse them. Replacing the cell re-slices the whole line through the grapheme-aware
+ * slicers, which is by far the most expensive part of painting a scrollbar.
+ */
+const paintedScrollbarLines = new WeakMap<ScrollView, Map<string, PaintedScrollbarLine>>();
 
 function paintScrollbar(box: LayoutBox, screen: string[], totalWidth: number): void {
 	const geometry = getScrollbarGeometry(box);
 	const scrollView = box.scrollView;
 	if (!geometry || !scrollView) return;
 
-	let cache = paintedScrollbarCells.get(scrollView);
+	let cache = paintedScrollbarLines.get(scrollView);
 	if (!cache) {
 		cache = new Map();
-		paintedScrollbarCells.set(scrollView, cache);
+		paintedScrollbarLines.set(scrollView, cache);
 	}
 	const preserveBackground = scrollView.scrollbar !== "always";
 	for (let offset = 0; offset < geometry.trackHeight; offset++) {
@@ -335,17 +341,17 @@ function paintScrollbar(box: LayoutBox, screen: string[], totalWidth: number): v
 			? scrollView.scrollbarThumbStyle(scrollView.isScrollbarActive ? "█" : "┃")
 			: scrollView.scrollbarTrackStyle("│");
 		const line = screen[row] ?? "";
-		// Replacing the cell re-slices the whole line through the grapheme-aware slicers. Rows whose
-		// painted cell and underlying line are unchanged reuse the string from the previous frame.
-		const cached = cache.get(row);
-		const painted =
-			cached !== undefined &&
-			cached.line === line &&
-			cached.column === geometry.column &&
-			cached.replacement === replacement
-				? cached.painted
-				: replaceScrollbarCell(line, geometry.column, totalWidth, replacement, preserveBackground);
-		cache.set(row, { line, column: geometry.column, replacement, painted });
+		let entry = cache.get(line);
+		if (entry === undefined || entry.column !== geometry.column || entry.preserveBackground !== preserveBackground) {
+			entry = { column: geometry.column, preserveBackground, byReplacement: new Map() };
+			if (cache.size >= PAINTED_SCROLLBAR_LINE_LIMIT) cache.clear();
+			cache.set(line, entry);
+		}
+		let painted = entry.byReplacement.get(replacement);
+		if (painted === undefined) {
+			painted = replaceScrollbarCell(line, geometry.column, totalWidth, replacement, preserveBackground);
+			entry.byReplacement.set(replacement, painted);
+		}
 		screen[row] = painted;
 	}
 }
