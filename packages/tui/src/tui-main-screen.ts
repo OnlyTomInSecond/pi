@@ -134,6 +134,8 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 	private previousHeight = 0;
 	private cursorRow = 0;
 	private hardwareCursorRow = 0;
+	private hardwareCursorCol = -1;
+	private hardwareCursorVisible: boolean | undefined;
 	private maxLinesRendered = 0;
 	private previousViewportTop = 0;
 
@@ -300,6 +302,8 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 		this.previousHeight = state.previousHeight;
 		this.cursorRow = state.cursorRow;
 		this.hardwareCursorRow = state.hardwareCursorRow;
+		this.hardwareCursorCol = -1;
+		this.hardwareCursorVisible = undefined;
 		this.maxLinesRendered = state.maxLinesRendered;
 		this.previousViewportTop = state.previousViewportTop;
 	}
@@ -317,6 +321,8 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 		this.previousHeight = -1;
 		this.cursorRow = 0;
 		this.hardwareCursorRow = 0;
+		this.hardwareCursorCol = -1;
+		this.hardwareCursorVisible = undefined;
 		this.maxLinesRendered = 0;
 		this.previousViewportTop = 0;
 	}
@@ -324,6 +330,7 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 	protected override beforeTerminalStop(options: TuiStopOptions): void {
 		if (options.preserveScreen || this.previousLines.length === 0) return;
 		this.terminal.write(" ");
+		this.hardwareCursorCol = -1;
 		const targetRow = this.previousLines.length;
 		const lineDiff = targetRow - this.hardwareCursorRow;
 		if (lineDiff > 0) this.terminal.write(`\x1b[${lineDiff}B`);
@@ -511,6 +518,7 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 			}
 			const bufferLength = Math.max(height, renderLines.length);
 			this.previousViewportTop = Math.max(0, bufferLength - height);
+			this.hardwareCursorCol = -1;
 			this.positionHardwareCursor(cursorPos, renderLines.length);
 			this.recordFrame(head, tail, true);
 			this.previousKittyImageIds = this.collectKittyImageIds(renderLines);
@@ -664,6 +672,7 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 				this.cursorRow = targetRow;
 				this.hardwareCursorRow = targetRow;
 			}
+			this.hardwareCursorCol = -1;
 			this.positionHardwareCursor(cursorPos, totalLines);
 			this.recordFrame(head, tail, rebuild);
 			if (trackKittyImages) this.previousKittyImageIds = this.collectKittyImageIds(newLines);
@@ -766,16 +775,20 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 				continue;
 			}
 
-			output.append("\x1b[2K"); // Clear current line
 			const outputLine = this.formatOutputLine(line);
-			if (!isImage && visibleWidth(outputLine) > width) {
+			const outputWidth = isImage ? 0 : visibleWidth(outputLine);
+			// A line that fills the terminal width overwrites the row completely, so erasing it first only
+			// flashes the row. A streamed block above the editor shifts the editor and footer rows every
+			// frame, and erasing them flickers the cursor and the IME candidate window.
+			if (outputWidth < width) output.append("\x1b[2K");
+			if (!isImage && outputWidth > width) {
 				// Log all lines to crash file for debugging
 				const crashLogPath = path.join(this.logDirectory ?? os.tmpdir(), "pi-tui-crash.log");
 				const crashLines = materialize();
 				const crashData = [
 					`Crash at ${new Date().toISOString()}`,
 					`Terminal width: ${width}`,
-					`Line ${i} visible width: ${visibleWidth(outputLine)}`,
+					`Line ${i} visible width: ${outputWidth}`,
 					"",
 					"=== All rendered lines ===",
 					...crashLines.map((l, idx) => `[${idx}] (w=${visibleWidth(l)}) ${l}`),
@@ -788,7 +801,7 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 				this.stop();
 
 				const errorMsg = [
-					`Rendered line ${i} exceeds terminal width (${visibleWidth(outputLine)} > ${width}).`,
+					`Rendered line ${i} exceeds terminal width (${outputWidth} > ${width}).`,
 					"",
 					"This is likely caused by a custom TUI component not truncating its output.",
 					"Use visibleWidth() to measure and truncateToWidth() to truncate lines.",
@@ -873,6 +886,7 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 		this.previousViewportTop = Math.max(prevViewportTop, finalCursorRow - height + 1);
 
 		// Position hardware cursor for IME
+		this.hardwareCursorCol = -1;
 		this.positionHardwareCursor(cursorPos, totalLines);
 
 		this.recordFrame(head, tail, rebuild);
@@ -891,7 +905,7 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 	 */
 	private positionHardwareCursor(cursorPos: { row: number; col: number } | null, totalLines: number): void {
 		if (!cursorPos || totalLines <= 0) {
-			this.terminal.hideCursor();
+			this.setHardwareCursorVisible(false);
 			return;
 		}
 
@@ -899,7 +913,9 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 		const targetRow = Math.max(0, Math.min(cursorPos.row, totalLines - 1));
 		const targetCol = Math.max(0, cursorPos.col);
 
-		// Move cursor from current position to target
+		// Move cursor from current position to target. Re-emitted moves and visibility toggles make the
+		// cursor and the IME candidate window flicker on terminals that apply them one by one, so only
+		// the parts that changed are written.
 		const rowDelta = targetRow - this.hardwareCursorRow;
 		let buffer = "";
 		if (rowDelta > 0) {
@@ -907,18 +923,24 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 		} else if (rowDelta < 0) {
 			buffer += `\x1b[${-rowDelta}A`; // Move up
 		}
-		// Move to absolute column (1-indexed)
-		buffer += `\x1b[${targetCol + 1}G`;
+		if (targetCol !== this.hardwareCursorCol) {
+			buffer += `\x1b[${targetCol + 1}G`; // Move to absolute column (1-indexed)
+		}
 
 		if (buffer) {
 			this.terminal.write(buffer);
 		}
 
 		this.hardwareCursorRow = targetRow;
-		if (this.getShowHardwareCursor()) {
-			this.terminal.showCursor();
-		} else {
-			this.terminal.hideCursor();
-		}
+		this.hardwareCursorCol = targetCol;
+		this.setHardwareCursorVisible(this.getShowHardwareCursor());
+	}
+
+	/** Show or hide the hardware cursor, writing only when the state changes. */
+	private setHardwareCursorVisible(visible: boolean): void {
+		if (this.hardwareCursorVisible === visible) return;
+		this.hardwareCursorVisible = visible;
+		if (visible) this.terminal.showCursor();
+		else this.terminal.hideCursor();
 	}
 }
