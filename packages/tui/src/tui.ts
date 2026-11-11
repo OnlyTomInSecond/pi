@@ -372,30 +372,40 @@ type OverlayFocusRestorePolicy = "clear" | "preserve";
  */
 export class Container implements Component {
 	children: Component[] = [];
-	private mouseLayout?: { width: number; children: Array<{ component: Component; height: number }> };
+	/**
+	 * Last render: the lines each child returned plus the assembled frame. A child that returns the
+	 * same array again has not changed, so an unchanged tree reuses the frame instead of rebuilding it.
+	 * Commit frames this way render in O(children) instead of copying every transcript line.
+	 */
+	private renderState?: { width: number; childLines: string[][]; heights: number[]; lines: string[] };
 
 	addChild(component: Component): void {
 		this.children.push(component);
+		this.renderState = undefined;
 	}
 
 	removeChild(component: Component): void {
 		const index = this.children.indexOf(component);
 		if (index !== -1) {
 			this.children.splice(index, 1);
+			this.renderState = undefined;
 		}
 	}
 
 	clear(): void {
 		this.children = [];
+		this.renderState = undefined;
 	}
 
 	invalidate(): void {
+		this.renderState = undefined;
 		for (const child of this.children) {
 			child.invalidate?.();
 		}
 	}
 
 	releaseRenderCache(): void {
+		this.renderState = undefined;
 		for (const child of this.children) {
 			child.releaseRenderCache?.();
 		}
@@ -406,18 +416,17 @@ export class Container implements Component {
 	 * not current. The main-screen renderer uses it to map committed transcript lines to children.
 	 */
 	childHeights(width: number): number[] | undefined {
-		if (this.mouseLayout?.width !== width) return undefined;
-		return this.mouseLayout.children.map((entry) => entry.height);
+		const state = this.renderState;
+		return state?.width === width ? state.heights : undefined;
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseDispatchResult | undefined {
 		if (event.y < 0 || event.y >= event.height) return undefined;
-		const mouseChildren =
-			this.mouseLayout?.width === event.width
-				? this.mouseLayout.children
-				: this.children.map((component) => ({ component, height: component.render(event.width).length }));
+		const state = this.renderState?.width === event.width ? this.renderState : undefined;
 		let childY = 0;
-		for (const { component: child, height: childHeight } of mouseChildren) {
+		for (let index = 0; index < this.children.length; index++) {
+			const child = this.children[index]!;
+			const childHeight = state?.heights[index] ?? child.render(event.width).length;
 			if (event.y >= childY && event.y < childY + childHeight) {
 				const result = dispatchMouseEvent(child, {
 					...event,
@@ -433,16 +442,25 @@ export class Container implements Component {
 	}
 
 	render(width: number): string[] {
+		const previous = this.renderState;
+		let unchanged =
+			previous !== undefined && previous.width === width && previous.childLines.length === this.children.length;
+		const childLines: string[][] = new Array(this.children.length);
+		const heights: number[] = new Array(this.children.length);
+		for (let index = 0; index < this.children.length; index++) {
+			const lines = this.children[index]!.render(width);
+			childLines[index] = lines;
+			heights[index] = lines.length;
+			if (unchanged && previous!.childLines[index] !== lines) unchanged = false;
+		}
+		if (unchanged) return previous!.lines;
 		const lines: string[] = [];
-		const mouseChildren: Array<{ component: Component; height: number }> = [];
-		for (const child of this.children) {
-			const childLines = child.render(width);
-			mouseChildren.push({ component: child, height: childLines.length });
-			for (const line of childLines) {
+		for (const childLinesOfChild of childLines) {
+			for (const line of childLinesOfChild) {
 				lines.push(line);
 			}
 		}
-		this.mouseLayout = { width, children: mouseChildren };
+		this.renderState = { width, childLines, heights, lines };
 		return lines;
 	}
 }
