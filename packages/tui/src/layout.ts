@@ -306,24 +306,47 @@ export function getScrollbarGeometry(box: LayoutBox, includeHiddenAuto = false):
 	};
 }
 
+interface PaintedScrollbarCell {
+	line: string;
+	column: number;
+	replacement: string;
+	painted: string;
+}
+
+/** Last painted scrollbar cell per track row, keyed by the scroll view that owns the scrollbar. */
+const paintedScrollbarCells = new WeakMap<ScrollView, Map<number, PaintedScrollbarCell>>();
+
 function paintScrollbar(box: LayoutBox, screen: string[], totalWidth: number): void {
 	const geometry = getScrollbarGeometry(box);
-	if (!geometry || !box.scrollView) return;
+	const scrollView = box.scrollView;
+	if (!geometry || !scrollView) return;
 
+	let cache = paintedScrollbarCells.get(scrollView);
+	if (!cache) {
+		cache = new Map();
+		paintedScrollbarCells.set(scrollView, cache);
+	}
+	const preserveBackground = scrollView.scrollbar !== "always";
 	for (let offset = 0; offset < geometry.trackHeight; offset++) {
 		const row = geometry.trackTop + offset;
 		if (row < box.clip.y || row >= box.clip.y + box.clip.height || row < 0 || row >= screen.length) continue;
 		const isThumb = row >= geometry.thumbTop && row < geometry.thumbTop + geometry.thumbHeight;
 		const replacement = isThumb
-			? box.scrollView.scrollbarThumbStyle(box.scrollView.isScrollbarActive ? "█" : "┃")
-			: box.scrollView.scrollbarTrackStyle("│");
-		screen[row] = replaceScrollbarCell(
-			screen[row] ?? "",
-			geometry.column,
-			totalWidth,
-			replacement,
-			box.scrollView.scrollbar !== "always",
-		);
+			? scrollView.scrollbarThumbStyle(scrollView.isScrollbarActive ? "█" : "┃")
+			: scrollView.scrollbarTrackStyle("│");
+		const line = screen[row] ?? "";
+		// Replacing the cell re-slices the whole line through the grapheme-aware slicers. Rows whose
+		// painted cell and underlying line are unchanged reuse the string from the previous frame.
+		const cached = cache.get(row);
+		const painted =
+			cached !== undefined &&
+			cached.line === line &&
+			cached.column === geometry.column &&
+			cached.replacement === replacement
+				? cached.painted
+				: replaceScrollbarCell(line, geometry.column, totalWidth, replacement, preserveBackground);
+		cache.set(row, { line, column: geometry.column, replacement, painted });
+		screen[row] = painted;
 	}
 }
 
