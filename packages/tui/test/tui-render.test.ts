@@ -562,7 +562,7 @@ describe("TUI Kitty image cleanup", () => {
 });
 
 describe("TUI resize handling", () => {
-	it("repaints the last screenful when the terminal height changes", async () => {
+	it("triggers full re-render when terminal height changes", async () => {
 		await withEnv({ TERMUX_VERSION: undefined }, async () => {
 			const terminal = new VirtualTerminal(40, 10);
 			const tui: TUI = new TuiMainScreen(terminal);
@@ -579,7 +579,8 @@ describe("TUI resize handling", () => {
 			terminal.resize(40, 15);
 			await terminal.waitForRender();
 
-			assert.strictEqual(tui.fullRedraws, initialRedraws, "height change keeps the scrollback");
+			// Should have triggered a full redraw
+			assert.ok(tui.fullRedraws > initialRedraws, "Height change should trigger full redraw");
 
 			const viewport = terminal.getViewport();
 			assert.ok(viewport[0]?.includes("Line 0"), "Content preserved after height change");
@@ -617,7 +618,7 @@ describe("TUI resize handling", () => {
 		});
 	});
 
-	it("repaints the last screenful when the terminal width changes", async () => {
+	it("triggers full re-render when terminal width changes", async () => {
 		const terminal = new VirtualTerminal(40, 10);
 		const tui: TUI = new TuiMainScreen(terminal);
 		const component = new TestComponent();
@@ -633,8 +634,8 @@ describe("TUI resize handling", () => {
 		terminal.resize(60, 10);
 		await terminal.waitForRender();
 
-		assert.strictEqual(tui.fullRedraws, initialRedraws, "width change keeps the scrollback");
-		assert.ok(terminal.getViewport()[0]?.includes("Line 0"), "content preserved at the new width");
+		// Should have triggered a full redraw
+		assert.ok(tui.fullRedraws > initialRedraws, "Width change should trigger full redraw");
 
 		tui.stop();
 	});

@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { BoundedTerminalWriter } from "./output-writer.ts";
-import { deleteKittyImage, getMaxKittyImageRows, isImageLine } from "./terminal-image.ts";
+import { deleteKittyImage, isImageLine } from "./terminal-image.ts";
 import {
 	COMMITTED_TUI,
 	type CommittedTUI,
@@ -501,24 +501,10 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 			return;
 		}
 
-		// Width changes re-wrap every line. Repainting the last screenful keeps the scrollback (at the
-		// old width) instead of rewriting the whole transcript, which is what floods a slow link. A
-		// Kitty image that starts above the window is the exception: only a full replay can place it.
-		const resizeRepaint = (reason: string): void => {
-			logRedraw(reason);
-			const windowStart = Math.max(0, totalLines - height);
-			let imageAboveWindow = false;
-			for (let i = Math.max(0, windowStart - getMaxKittyImageRows()); i < windowStart; i++) {
-				if (isImageLine(lineAt(i))) {
-					imageAboveWindow = true;
-					break;
-				}
-			}
-			fullRender(imageAboveWindow ? "all" : "window");
-		};
-
+		// Width changes always need a full re-render because wrapping changes.
 		if (widthChanged) {
-			resizeRepaint(`terminal width changed (${this.previousWidth} -> ${width})`);
+			logRedraw(`terminal width changed (${this.previousWidth} -> ${width})`);
+			fullRender("all");
 			return;
 		}
 
@@ -526,7 +512,8 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 		// but Termux changes height when the software keyboard shows or hides.
 		// In that environment, a full redraw causes the entire history to replay on every toggle.
 		if (heightChanged && !isTermuxSession()) {
-			resizeRepaint(`terminal height changed (${this.previousHeight} -> ${height})`);
+			logRedraw(`terminal height changed (${this.previousHeight} -> ${height})`);
+			fullRender("all");
 			return;
 		}
 
