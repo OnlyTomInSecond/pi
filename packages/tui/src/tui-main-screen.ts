@@ -611,6 +611,15 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 			return;
 		}
 
+		// The screen no longer shows the end of the content: rows above the viewport top were removed
+		// (a tall block collapsed, a message lost its expanded rows) and the terminal cannot scroll
+		// back to them. Clearing the remaining rows would show them as blank, so replay the transcript.
+		if (totalLines - 1 < prevViewportTop) {
+			logRedraw(`content ended above viewportTop (${totalLines - 1} < ${prevViewportTop})`);
+			fullRender(true);
+			return;
+		}
+
 		// All changes are in deleted lines (nothing to render, just clear)
 		if (firstChanged >= totalLines) {
 			if (previousTotal > totalLines) {

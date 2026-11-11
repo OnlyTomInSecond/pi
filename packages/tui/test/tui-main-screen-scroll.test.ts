@@ -94,4 +94,25 @@ describe("TuiMainScreen scroll preservation", () => {
 		);
 		assert.ok(terminal.writes.join("").includes("\x1b[48;5;22ml0"), "rows above the viewport get the new style");
 	});
+
+	it("replays the transcript when the content ends above the viewport top", async () => {
+		const terminal = new VirtualTerminal(40, 10);
+		const tui = new TuiMainScreen(terminal);
+		tui.setCommittedComponent(new LinesComponent(Array.from({ length: 20 }, (_, index) => `c${index}`)));
+		const live = new LinesComponent(Array.from({ length: 20 }, (_, index) => `l${index}`));
+		tui.addChild(live);
+		tui.addChild(new LinesComponent(["editor", "footer"]));
+		tui.renderNow();
+		await terminal.flush();
+
+		const redraws = tui.fullRedraws;
+		// A tall block collapses: the rows above the viewport are gone and the terminal cannot scroll back.
+		live.lines = live.lines.slice(0, 3);
+		tui.renderNow();
+		await terminal.flush();
+
+		assert.strictEqual(tui.fullRedraws, redraws + 1, "a shrunken transcript must be replayed");
+		const viewport = terminal.getViewport().map((line) => line.trimEnd());
+		assert.deepStrictEqual(viewport.slice(-3), ["l2", "editor", "footer"], "end of the transcript stays visible");
+	});
 });
