@@ -54,6 +54,13 @@ const ENABLE_AUTOWRAP = "\x1b[?7h";
 const ENABLE_BUTTON_MOTION_MOUSE = "\x1b[?1000h\x1b[?1002h\x1b[?1004h\x1b[?1006h";
 const ENABLE_ALL_MOTION_MOUSE = "\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1004h\x1b[?1006h";
 const DISABLE_MOUSE = "\x1b[?1006l\x1b[?1004l\x1b[?1003l\x1b[?1002l\x1b[?1000l";
+/**
+ * Terminals turn the wheel into cursor keys in the alternate screen (alternate scroll), which makes it
+ * edit the input and walk its history instead of scrolling the transcript. Turn that off while the
+ * mouse is not captured, where the app cannot see wheel events itself.
+ */
+const DISABLE_ALTERNATE_SCROLL = "\x1b[?1007l";
+const ENABLE_ALTERNATE_SCROLL = "\x1b[?1007h";
 const FOCUS_IN = "\x1b[I";
 const FOCUS_OUT = "\x1b[O";
 const BEGIN_SYNCHRONIZED_OUTPUT = "\x1b[?2026h";
@@ -299,7 +306,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.lastComponentClick = undefined;
 		this.resetRenderState();
 		this.terminal.write(
-			`${ENTER_ALT_SCREEN}${DISABLE_AUTOWRAP}${this.mouseEnabled ? this.mouseEnableSequence() : ""}\x1b[2J\x1b[H\x1b[?25l`,
+			`${ENTER_ALT_SCREEN}${DISABLE_AUTOWRAP}${this.mouseEnabled ? this.mouseEnableSequence() : DISABLE_ALTERNATE_SCROLL}\x1b[2J\x1b[H\x1b[?25l`,
 		);
 	}
 
@@ -316,7 +323,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.clearComponentMouseGesture();
 		this.lastComponentClick = undefined;
 		if (!this.altScreenActive) return;
-		this.terminal.write(enabled ? this.mouseEnableSequence() : DISABLE_MOUSE);
+		this.terminal.write(enabled ? this.mouseEnableSequence() : `${DISABLE_MOUSE}${DISABLE_ALTERNATE_SCROLL}`);
 		this.requestRender();
 	}
 
@@ -341,7 +348,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.flashes.dispose();
 		if (!this.altScreenActive) return;
 		this.terminal.write(
-			`${BEGIN_SYNCHRONIZED_OUTPUT}${this.deleteKittyImages()}${this.mouseEnabled ? DISABLE_MOUSE : ""}${ENABLE_AUTOWRAP}${END_SYNCHRONIZED_OUTPUT}`,
+			`${BEGIN_SYNCHRONIZED_OUTPUT}${this.deleteKittyImages()}${this.mouseEnabled ? DISABLE_MOUSE : `${DISABLE_MOUSE}${ENABLE_ALTERNATE_SCROLL}`}${ENABLE_AUTOWRAP}${END_SYNCHRONIZED_OUTPUT}`,
 		);
 		this.uploadedKittyImages.clear();
 	}
@@ -511,11 +518,12 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			// SGR mouse button codes use bit 3 (value 8) for the Alt modifier.
 			const wheelDelta =
 				wheelEvent.direction * ((wheelEvent.button & 8) !== 0 ? lines * ALT_WHEEL_SCROLL_MULTIPLIER : lines);
+			// The wheel scrolls content: it goes to an open overlay (dialogs scroll their own lists) and
+			// otherwise to the scroll views, never to components that would treat it as input.
 			const event = this.createMouseEvent("wheel", wheelEvent.button, wheelEvent.x, wheelEvent.y, { wheelDelta });
 			const overlay = this.dispatchMouseToOverlay(event);
-			const result = overlay.result ?? (overlay.hit ? undefined : this.dispatchMouseToLayout(event));
-			if (result) {
-				if (this.applyMouseDispatchResult(event, result)) this.requestRender();
+			if (overlay.result) {
+				if (this.applyMouseDispatchResult(event, overlay.result)) this.requestRender();
 				return { consume: true };
 			}
 			this.routeWheel(wheelEvent, wheelDelta);

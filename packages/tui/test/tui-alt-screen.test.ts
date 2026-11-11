@@ -117,6 +117,55 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
+	it("disables the terminal's alternate scroll while the mouse is not captured", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal, undefined, undefined, { mouse: false });
+		tui.addChild({ render: () => ["content"], invalidate() {} });
+		const writeText = (): string =>
+			terminal.events
+				.filter((event) => event.type === "write")
+				.map((event) => event.data)
+				.join("");
+
+		tui.start();
+		await terminal.waitForRender();
+		// Without capture the terminal would turn the wheel into cursor keys, which edits the input.
+		assert.ok(writeText().includes("\x1b[?1007l"), "wheel must not become cursor keys");
+		tui.stop();
+		assert.ok(writeText().includes("\x1b[?1007h"), "the terminal's alternate scroll is restored");
+	});
+
+	it("scrolls the transcript on a wheel event even over a component that handles wheels", async () => {
+		const terminal = new VirtualTerminal(40, 10);
+		const tui = new TuiAltScreen(terminal);
+		const wheelEvents: TuiMouseEvent[] = [];
+		const lines = Array.from({ length: 60 }, (_, index) => `line ${index + 1}`);
+		const transcript = new ScrollView(new Text(lines.join("\n"), 0, 0), { follow: "end", primary: true });
+		// A dock component that claims wheel events, as a list in the document would.
+		const dock = new MouseRegion(new Text("dock", 0, 0), (event) => {
+			if (event.type !== "wheel") return undefined;
+			wheelEvents.push(event);
+			return { handled: true };
+		});
+		tui.setLayoutRoot(
+			new VStack([
+				{ component: transcript, basis: 0, grow: 1, minSize: 1 },
+				{ component: dock, basis: 2, minSize: 1 },
+			]),
+		);
+		tui.start();
+		await terminal.waitForRender();
+		tui.renderNow();
+		const before = transcript.scrollTop;
+
+		terminal.sendInput("\x1b[<64;3;9M"); // wheel up over the dock row
+		await terminal.waitForRender();
+
+		assert.ok(transcript.scrollTop < before, "the wheel scrolls the transcript");
+		assert.deepStrictEqual(wheelEvents, [], "components do not treat the wheel as input");
+		tui.stop();
+	});
+
 	it("renders a terminal-height viewport and preserves manual scroll position", async () => {
 		const terminal = new VirtualTerminal(20, 4);
 		const tui = new TuiAltScreen(terminal);
@@ -563,22 +612,21 @@ describe("TuiAltScreen", () => {
 	it("applies runtime wheel line count updates", async () => {
 		const terminal = new VirtualTerminal(20, 4);
 		const tui = new TuiAltScreen(terminal, undefined, undefined, { wheelScrollLines: 3 });
-		const deltas: Array<number | undefined> = [];
-		tui.addChild(
-			new MouseRegion(new Text("wheel target", 0, 0), (event) => {
-				if (event.type !== "wheel") return undefined;
-				deltas.push(event.wheelDelta);
-				return { handled: true };
-			}),
-		);
+		const lines = Array.from({ length: 40 }, (_, index) => `line ${index + 1}`);
+		const view = new ScrollView(new Text(lines.join("\n"), 0, 0), { follow: "end", primary: true });
+		tui.setLayoutRoot(view);
 		tui.start();
 		try {
 			await terminal.waitForRender();
-			terminal.sendInput("\x1b[<64;1;1M");
-			tui.setWheelScrollLines(2);
-			terminal.sendInput("\x1b[<65;1;1M");
-			terminal.sendInput("\x1b[<72;1;1M");
-			assert.deepStrictEqual(deltas, [-3, 2, -10]);
+			const deltas: number[] = [];
+			for (const input of ["\x1b[<64;1;1M", "\x1b[<65;1;1M", "\x1b[<72;1;1M"]) {
+				if (input.includes("<72")) tui.setWheelScrollLines(2);
+				const before = view.scrollTop;
+				terminal.sendInput(input);
+				await terminal.waitForRender();
+				deltas.push(view.scrollTop - before);
+			}
+			assert.deepStrictEqual(deltas, [-3, 3, -10]);
 		} finally {
 			tui.stop();
 		}
@@ -2085,31 +2133,6 @@ describe("TuiAltScreen", () => {
 		await terminal.waitForRender();
 		assert.strictEqual(renderCount, renderedBeforeMotion);
 		assert.strictEqual(terminal.events.filter((event) => event.type === "write").length, writesBeforeMotion);
-		tui.stop();
-	});
-
-	it("lets mouse-aware components consume wheel events before viewport scrolling", async () => {
-		const terminal = new VirtualTerminal(20, 3);
-		const tui = new TuiAltScreen(terminal);
-		let wheelEvents = 0;
-		tui.addChild(
-			new MouseRegion(
-				new Text(Array.from({ length: 8 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0),
-				(event) => {
-					if (event.type !== "wheel") return undefined;
-					wheelEvents += 1;
-					return { handled: true };
-				},
-			),
-		);
-		tui.start();
-		await terminal.waitForRender();
-		const viewportTop = tui.viewportTop;
-
-		terminal.sendInput("\x1b[<64;1;1M");
-		await terminal.waitForRender();
-		assert.strictEqual(wheelEvents, 1);
-		assert.strictEqual(tui.viewportTop, viewportTop);
 		tui.stop();
 	});
 
