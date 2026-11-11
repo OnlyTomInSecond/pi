@@ -61,6 +61,55 @@ function isTermuxSession(): boolean {
 	return Boolean(process.env.TERMUX_VERSION);
 }
 
+/**
+ * Index after the SGR sequence starting at `index`, or `-1` when the bytes there are not an SGR sequence.
+ * Only SGR (`CSI ... m`) is styling: any other escape sequence carries content the terminal shows.
+ */
+function sgrEnd(line: string, index: number): number {
+	let i = index + 2;
+	while (i < line.length) {
+		const code = line.charCodeAt(i);
+		if (code === 0x6d) return i + 1; // "m"
+		if (code < 0x30 || code > 0x3b) return -1; // digits, ";" and ":" only
+		i++;
+	}
+	return -1;
+}
+
+/**
+ * Whether two rendered lines show the same text and differ only in SGR styling, such as a tool block
+ * switching its background from the pending to the result color.
+ */
+function sameTextWithDifferentStyle(before: string, after: string): boolean {
+	let i = 0;
+	let j = 0;
+	let styled = false;
+	while (true) {
+		if (before.charCodeAt(i) === 0x1b && before.charCodeAt(i + 1) === 0x5b) {
+			const end = sgrEnd(before, i);
+			if (end !== -1) {
+				i = end;
+				styled = true;
+				continue;
+			}
+		}
+		if (after.charCodeAt(j) === 0x1b && after.charCodeAt(j + 1) === 0x5b) {
+			const end = sgrEnd(after, j);
+			if (end !== -1) {
+				j = end;
+				styled = true;
+				continue;
+			}
+		}
+		const beforeCode = i < before.length ? before.charCodeAt(i) : -1;
+		const afterCode = j < after.length ? after.charCodeAt(j) : -1;
+		if (beforeCode !== afterCode) return false;
+		if (beforeCode === -1) return styled;
+		i++;
+		j++;
+	}
+}
+
 /** TUI implementation that renders into the terminal's main screen and scrollback. */
 export class TuiMainScreen extends TuiBase implements CommittedTUI {
 	readonly mode = "regular" as const;
@@ -625,10 +674,27 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 				fullRender(true);
 				return;
 			}
-			// A live change scrolled above the viewport (e.g. a reflowing streaming message taller
-			// than the screen). Those lines are in terminal scrollback and cannot be rewritten;
-			// repaint from the viewport top instead of clearing scrollback and replaying history,
-			// which would yank the user back to the bottom while they read earlier output.
+			// Rows above the viewport are in terminal scrollback and cannot be rewritten. A text change
+			// there (a reflowing streaming message taller than the screen) only has to reach the
+			// viewport down, so repaint from the viewport top instead of clearing scrollback and
+			// replaying history, which would yank the user back to the bottom while they read it.
+			// A style-only change there (a finished tool block switching its background, which repaints
+			// every row it covers) is visible whenever the user scrolls back, so it does need the replay.
+			const styleLimit = Math.min(prevViewportTop, totalLines);
+			let styleOnly = true;
+			for (let i = firstChanged; i < styleLimit; i++) {
+				const before = this.previousLines[i] ?? "";
+				const after = lineAt(i);
+				if (before !== after && !sameTextWithDifferentStyle(before, after)) {
+					styleOnly = false;
+					break;
+				}
+			}
+			if (styleOnly) {
+				logRedraw(`style-only change above viewportTop (${firstChanged} < ${prevViewportTop})`);
+				fullRender(true);
+				return;
+			}
 			firstChanged = Math.min(prevViewportTop, totalLines - 1);
 		}
 

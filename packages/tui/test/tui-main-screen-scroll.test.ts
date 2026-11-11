@@ -68,4 +68,30 @@ describe("TuiMainScreen scroll preservation", () => {
 			"bottom of the live transcript stays visible",
 		);
 	});
+
+	it("replays the transcript when a change above the viewport only restyles it", async () => {
+		const styled = (palette: number): string[] =>
+			Array.from({ length: 20 }, (_, index) => `\x1b[48;5;${palette}ml${index}         \x1b[49m`);
+		const terminal = new CapturingTerminal(40, 10);
+		const tui = new TuiMainScreen(terminal);
+		tui.setCommittedComponent(new LinesComponent(Array.from({ length: 20 }, (_, index) => `c${index}`)));
+		const live = new LinesComponent(styled(236));
+		tui.addChild(live);
+		tui.renderNow();
+		await terminal.flush();
+
+		const redraws = tui.fullRedraws;
+		// A finished tool block repaints every row it covers. Rows above the viewport are in scrollback
+		// and only the replay can still reach them.
+		live.lines = styled(22);
+		tui.renderNow();
+		await terminal.flush();
+
+		assert.strictEqual(tui.fullRedraws, redraws + 1, "style-only change above the viewport must replay");
+		assert.ok(
+			terminal.getScrollBuffer().some((line) => line.includes("l0")),
+			"transcript stays in the buffer",
+		);
+		assert.ok(terminal.writes.join("").includes("\x1b[48;5;22ml0"), "rows above the viewport get the new style");
+	});
 });
