@@ -323,7 +323,11 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.clearComponentMouseGesture();
 		this.lastComponentClick = undefined;
 		if (!this.altScreenActive) return;
-		this.terminal.write(enabled ? this.mouseEnableSequence() : `${DISABLE_MOUSE}${DISABLE_ALTERNATE_SCROLL}`);
+		this.terminal.write(
+			enabled
+				? `${this.mouseEnableSequence()}${ENABLE_ALTERNATE_SCROLL}`
+				: `${DISABLE_MOUSE}${DISABLE_ALTERNATE_SCROLL}`,
+		);
 		this.requestRender();
 	}
 
@@ -348,7 +352,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.flashes.dispose();
 		if (!this.altScreenActive) return;
 		this.terminal.write(
-			`${BEGIN_SYNCHRONIZED_OUTPUT}${this.deleteKittyImages()}${this.mouseEnabled ? DISABLE_MOUSE : `${DISABLE_MOUSE}${ENABLE_ALTERNATE_SCROLL}`}${ENABLE_AUTOWRAP}${END_SYNCHRONIZED_OUTPUT}`,
+			`${BEGIN_SYNCHRONIZED_OUTPUT}${this.deleteKittyImages()}${this.mouseEnabled ? DISABLE_MOUSE : ENABLE_ALTERNATE_SCROLL}${ENABLE_AUTOWRAP}${END_SYNCHRONIZED_OUTPUT}`,
 		);
 		this.uploadedKittyImages.clear();
 	}
