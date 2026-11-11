@@ -447,6 +447,13 @@ export const SettingsSchema = Type.Object(
 				default: SETTINGS_DEFAULTS.fullscreenScrollbar,
 			}),
 		),
+		fullscreenMouse: Type.Optional(
+			Type.Union([Type.Literal("app"), Type.Literal("terminal")], {
+				description:
+					'"terminal" leaves mouse reporting off in fullscreen mode so the terminal keeps click-drag selection and copy; "app" captures the mouse for wheel scrolling, hover and pi\'s own selection.',
+				default: SETTINGS_DEFAULTS.fullscreenMouse,
+			}),
+		),
 		fullscreenCopyOnSelect: Type.Optional(
 			Type.Boolean({
 				description: "No effect in regular TUI mode.",

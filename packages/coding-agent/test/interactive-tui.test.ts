@@ -131,6 +131,7 @@ describe("createInteractiveTui", () => {
 				session: {
 					settingsManager: {
 						getFullscreenCopyOnSelect: () => boolean;
+						getFullscreenMouse: () => "app" | "terminal";
 						getFullscreenWheelScrollLines: () => WheelScrollLines;
 					};
 				};
@@ -154,7 +155,11 @@ describe("createInteractiveTui", () => {
 		const context = Object.assign(Object.create(InteractiveMode.prototype), {
 			runtimeHost: {
 				session: {
-					settingsManager: { getFullscreenCopyOnSelect: () => true, getFullscreenWheelScrollLines: () => "auto" },
+					settingsManager: {
+						getFullscreenCopyOnSelect: () => true,
+						getFullscreenMouse: () => "terminal",
+						getFullscreenWheelScrollLines: () => "auto",
+					},
 				},
 			},
 			renderer,

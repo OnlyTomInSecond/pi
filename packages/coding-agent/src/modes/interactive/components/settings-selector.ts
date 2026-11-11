@@ -99,6 +99,7 @@ export interface SettingsConfig {
 	fullscreenExitOutput: FullscreenExitOutput;
 	fullscreenScrollbar: ScrollViewScrollbar;
 	fullscreenCopyOnSelect: boolean;
+	fullscreenMouse: "app" | "terminal";
 	fullscreenWheelScrollLines: WheelScrollLines;
 	warnings: WarningSettings;
 }
@@ -139,6 +140,7 @@ export interface SettingsCallbacks {
 	onFullscreenExitOutputChange: (output: FullscreenExitOutput) => void;
 	onFullscreenScrollbarChange: (mode: ScrollViewScrollbar) => void;
 	onFullscreenCopyOnSelectChange: (enabled: boolean) => void;
+	onFullscreenMouseChange: (mode: "app" | "terminal") => void;
 	onFullscreenWheelScrollLinesChange: (lines: WheelScrollLines) => void;
 	onWarningsChange: (warnings: WarningSettings) => void;
 	onCancel: () => void;
@@ -744,6 +746,14 @@ export class SettingsSelectorComponent extends Container {
 				values: ["true", "false"],
 			},
 			{
+				id: "fullscreen-mouse",
+				label: "Fullscreen mouse",
+				description:
+					"'terminal' lets the terminal select and copy text with the mouse (no wheel scrolling); 'app' captures the mouse for wheel scrolling, hover and pi's own selection",
+				currentValue: config.fullscreenMouse,
+				values: ["terminal", "app"],
+			},
+			{
 				id: "fullscreen-wheel-scroll-lines",
 				label: "Fullscreen wheel scrolling",
 				description:
@@ -986,6 +996,9 @@ export class SettingsSelectorComponent extends Container {
 						break;
 					case "fullscreen-copy-on-select":
 						callbacks.onFullscreenCopyOnSelectChange(newValue === "true");
+						break;
+					case "fullscreen-mouse":
+						callbacks.onFullscreenMouseChange(newValue === "app" ? "app" : "terminal");
 						break;
 					case "fullscreen-wheel-scroll-lines":
 						callbacks.onFullscreenWheelScrollLinesChange(newValue === "auto" ? "auto" : parseInt(newValue, 10));

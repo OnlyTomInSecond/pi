@@ -1299,6 +1299,16 @@ export class SettingsManager {
 		this.save();
 	}
 
+	getFullscreenMouse(): "app" | "terminal" {
+		return this.settings.fullscreenMouse === "app" ? "app" : SETTINGS_DEFAULTS.fullscreenMouse;
+	}
+
+	setFullscreenMouse(mode: "app" | "terminal"): void {
+		this.globalSettings.fullscreenMouse = mode;
+		this.markModified("fullscreenMouse");
+		this.save();
+	}
+
 	getFullscreenCopyOnSelect(): boolean {
 		return this.settings.fullscreenCopyOnSelect ?? SETTINGS_DEFAULTS.fullscreenCopyOnSelect;
 	}

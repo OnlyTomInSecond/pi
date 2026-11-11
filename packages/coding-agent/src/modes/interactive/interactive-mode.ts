@@ -666,6 +666,7 @@ export class InteractiveMode {
 			terminal: options.terminal,
 			onRightClickPaste: this.onRightClickPaste,
 			fullscreenCopyOnSelect: this.settingsManager.getFullscreenCopyOnSelect(),
+			fullscreenMouse: this.settingsManager.getFullscreenMouse(),
 			fullscreenWheelScrollLines: this.settingsManager.getFullscreenWheelScrollLines(),
 		});
 		this.ui = createInteractiveTuiReference(() => this.renderer);
@@ -1020,6 +1021,7 @@ export class InteractiveMode {
 			terminal,
 			onRightClickPaste: this.onRightClickPaste,
 			fullscreenCopyOnSelect: this.settingsManager.getFullscreenCopyOnSelect(),
+			fullscreenMouse: this.settingsManager.getFullscreenMouse(),
 			fullscreenWheelScrollLines: this.settingsManager.getFullscreenWheelScrollLines(),
 		});
 		nextUi.setClearOnShrink(clearOnShrink);
@@ -2243,6 +2245,7 @@ export class InteractiveMode {
 		this.applyFullscreenScrollbarSetting();
 		if (this.renderer instanceof TuiAltScreen) {
 			this.renderer.setCopyOnSelect(this.settingsManager.getFullscreenCopyOnSelect());
+			this.renderer.setMouseEnabled(this.settingsManager.getFullscreenMouse() === "app");
 			this.renderer.setWheelScrollLines(this.settingsManager.getFullscreenWheelScrollLines());
 		}
 		this.footer.setSession(this.session);
@@ -5214,6 +5217,7 @@ export class InteractiveMode {
 					fullscreenExitOutput: this.settingsManager.getFullscreenExitOutput(),
 					fullscreenScrollbar: this.settingsManager.getFullscreenScrollbar(),
 					fullscreenCopyOnSelect: this.settingsManager.getFullscreenCopyOnSelect(),
+					fullscreenMouse: this.settingsManager.getFullscreenMouse(),
 					fullscreenWheelScrollLines: this.settingsManager.getFullscreenWheelScrollLines(),
 					warnings: this.settingsManager.getWarnings(),
 				},
@@ -5408,6 +5412,10 @@ export class InteractiveMode {
 					onFullscreenCopyOnSelectChange: (enabled) => {
 						this.settingsManager.setFullscreenCopyOnSelect(enabled);
 						if (this.renderer instanceof TuiAltScreen) this.renderer.setCopyOnSelect(enabled);
+					},
+					onFullscreenMouseChange: (mode) => {
+						this.settingsManager.setFullscreenMouse(mode);
+						if (this.renderer instanceof TuiAltScreen) this.renderer.setMouseEnabled(mode === "app");
 					},
 					onFullscreenWheelScrollLinesChange: (lines) => {
 						this.settingsManager.setFullscreenWheelScrollLines(lines);

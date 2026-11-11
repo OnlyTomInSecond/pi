@@ -156,7 +156,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		y: number;
 	};
 	private readonly wheelScroll: WheelScrollAccelerator;
-	private readonly mouseEnabled: boolean;
+	private mouseEnabled: boolean;
 	private readonly scrollToEndIndicator?: () => string;
 	private readonly onRightClickPaste?: () => void;
 	private readonly scrollbar: AltScreenScrollbar;
@@ -298,20 +298,39 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.clearComponentMouseGesture();
 		this.lastComponentClick = undefined;
 		this.resetRenderState();
+		this.terminal.write(
+			`${ENTER_ALT_SCREEN}${DISABLE_AUTOWRAP}${this.mouseEnabled ? this.mouseEnableSequence() : ""}\x1b[2J\x1b[H\x1b[?25l`,
+		);
+	}
+
+	/**
+	 * Turn terminal mouse reporting on or off while the alternate screen is active. With it off, the
+	 * terminal keeps click-drag selection and copy, at the cost of wheel events: the alternate screen
+	 * has no scrollback of its own, so wheel scrolling, hover and scrollbar dragging stop working.
+	 */
+	setMouseEnabled(enabled: boolean): void {
+		if (this.mouseEnabled === enabled) return;
+		this.mouseEnabled = enabled;
+		this.selection.reset();
+		this.scrollbar.reset();
+		this.clearComponentMouseGesture();
+		this.lastComponentClick = undefined;
+		if (!this.altScreenActive) return;
+		this.terminal.write(enabled ? this.mouseEnableSequence() : DISABLE_MOUSE);
+		this.requestRender();
+	}
+
+	// Multiplexers can lag when every pointer movement is forwarded. Button-motion tracking
+	// preserves clicks, wheel events, selections, and scrollbar dragging.
+	private mouseEnableSequence(): string {
 		const term = process.env.TERM?.toLowerCase() ?? "";
-		// Multiplexers can lag when every pointer movement is forwarded. Button-motion
-		// tracking preserves clicks, wheel events, selections, and scrollbar dragging.
-		const mouseSequence =
-			process.env.TMUX !== undefined ||
+		return process.env.TMUX !== undefined ||
 			process.env.ZELLIJ !== undefined ||
 			process.env.STY !== undefined ||
 			term.startsWith("tmux") ||
 			term.startsWith("screen")
-				? ENABLE_BUTTON_MOTION_MOUSE
-				: ENABLE_ALL_MOTION_MOUSE;
-		this.terminal.write(
-			`${ENTER_ALT_SCREEN}${DISABLE_AUTOWRAP}${this.mouseEnabled ? mouseSequence : ""}\x1b[2J\x1b[H\x1b[?25l`,
-		);
+			? ENABLE_BUTTON_MOTION_MOUSE
+			: ENABLE_ALL_MOTION_MOUSE;
 	}
 
 	protected override beforeTerminalStop(_options: TuiStopOptions): void {

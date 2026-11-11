@@ -93,6 +93,30 @@ describe("TuiAltScreen", () => {
 		tui.stop();
 	});
 
+	it("leaves terminal mouse reporting off when the renderer is not given the mouse", async () => {
+		const terminal = new RecordingTerminal(20, 4);
+		const tui = new TuiAltScreen(terminal, undefined, undefined, { mouse: false });
+		tui.addChild({ render: () => ["content"], invalidate() {} });
+
+		tui.start();
+		await terminal.waitForRender();
+		const writeText = (): string =>
+			terminal.events
+				.filter((event) => event.type === "write")
+				.map((event) => event.data)
+				.join("");
+		assert.ok(!writeText().includes("\x1b[?1000h"), "no mouse reporting while the terminal owns selection");
+
+		tui.setMouseEnabled(true);
+		await terminal.waitForRender();
+		assert.ok(writeText().includes("\x1b[?1000h"), "enabling the mouse reports button events");
+
+		tui.setMouseEnabled(false);
+		await terminal.waitForRender();
+		assert.ok(writeText().includes("\x1b[?1000l"), "disabling the mouse hands selection back to the terminal");
+		tui.stop();
+	});
+
 	it("renders a terminal-height viewport and preserves manual scroll position", async () => {
 		const terminal = new VirtualTerminal(20, 4);
 		const tui = new TuiAltScreen(terminal);
