@@ -445,16 +445,16 @@ export class Container implements Component {
 		const previous = this.renderState;
 		const sameChildren =
 			previous !== undefined && previous.width === width && previous.childLines.length === this.children.length;
-		const childLines: string[][] = new Array(this.children.length);
-		const heights: number[] = new Array(this.children.length);
+		const childLines = sameChildren ? previous.childLines : new Array<string[]>(this.children.length);
+		const heights = sameChildren ? previous.heights : new Array<number>(this.children.length);
 		// Index of the first child whose lines changed, or -1 while every child returned its last array.
 		let firstChanged = sameChildren ? -1 : 0;
 		let unchangedLines = 0;
 		for (let index = 0; index < this.children.length; index++) {
 			const lines = this.children[index]!.render(width);
+			if (firstChanged === -1 && previous!.childLines[index] !== lines) firstChanged = index;
 			childLines[index] = lines;
 			heights[index] = lines.length;
-			if (firstChanged === -1 && previous!.childLines[index] !== lines) firstChanged = index;
 			if (firstChanged === -1) unchangedLines += lines.length;
 		}
 		if (firstChanged === -1) return previous!.lines;
@@ -465,7 +465,8 @@ export class Container implements Component {
 				lines.push(line);
 			}
 		}
-		this.renderState = { width, childLines, heights, lines };
+		if (sameChildren) previous!.lines = lines;
+		else this.renderState = { width, childLines, heights, lines };
 		return lines;
 	}
 }
