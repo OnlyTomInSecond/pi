@@ -127,6 +127,15 @@ export class VirtualTerminal implements Terminal {
 	}
 
 	/**
+	 * Wait for the frame of a coalesced resize. The renderer paints once the size holds still, which
+	 * takes longer than the wait in waitForRender().
+	 */
+	async waitForResize(): Promise<void> {
+		await new Promise<void>((resolve) => setTimeout(resolve, 120));
+		await this.waitForRender();
+	}
+
+	/**
 	 * Wait for all pending writes to complete. Viewport and scroll buffer will be updated.
 	 */
 	async flush(): Promise<void> {

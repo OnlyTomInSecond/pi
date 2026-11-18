@@ -577,7 +577,7 @@ describe("TUI resize handling", () => {
 
 			// Resize height
 			terminal.resize(40, 15);
-			await terminal.waitForRender();
+			await terminal.waitForResize();
 
 			assert.strictEqual(tui.fullRedraws, initialRedraws, "height changes keep the scrollback");
 
@@ -603,7 +603,7 @@ describe("TUI resize handling", () => {
 			const initialRedraws = tui.fullRedraws;
 			for (const height of [15, 8, 14, 11]) {
 				terminal.resize(40, height);
-				await terminal.waitForRender();
+				await terminal.waitForResize();
 			}
 
 			assert.strictEqual(tui.fullRedraws, initialRedraws, "Height change should not trigger full redraw");
@@ -629,7 +629,7 @@ describe("TUI resize handling", () => {
 		const initialRedraws = tui.fullRedraws;
 
 		terminal.resize(60, 10);
-		await terminal.waitForRender();
+		await terminal.waitForResize();
 
 		assert.strictEqual(tui.fullRedraws, initialRedraws, "a long transcript keeps its scrollback");
 		assert.deepStrictEqual(
@@ -640,6 +640,28 @@ describe("TUI resize handling", () => {
 			["Line 50", "Line 51"],
 			"the last screenful stays visible at the new width",
 		);
+		tui.stop();
+	});
+
+	it("paints once for a burst of resizes", async () => {
+		const terminal = new VirtualTerminal(40, 10);
+		const tui: TUI = new TuiMainScreen(terminal);
+		const component = new InputComponent();
+		component.lines = ["Line 0"];
+		tui.addChild(component);
+		tui.start();
+		await terminal.waitForRender();
+		const rendersBeforeBurst = component.renderCount;
+
+		for (const width of [41, 42, 43, 44, 45]) terminal.resize(width, 10);
+		await terminal.waitForResize();
+
+		assert.strictEqual(
+			component.renderCount - rendersBeforeBurst,
+			1,
+			"a dragged width paints once, at the width the drag settled on",
+		);
+		assert.ok(terminal.getViewport()[0]?.includes("Line 0"), "the settled frame is painted");
 		tui.stop();
 	});
 
@@ -657,7 +679,7 @@ describe("TUI resize handling", () => {
 
 		// Resize width
 		terminal.resize(60, 10);
-		await terminal.waitForRender();
+		await terminal.waitForResize();
 
 		// Should have triggered a full redraw
 		assert.ok(tui.fullRedraws > initialRedraws, "Width change should trigger full redraw");

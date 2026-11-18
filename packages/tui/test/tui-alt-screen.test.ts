@@ -1347,7 +1347,7 @@ describe("TuiAltScreen", () => {
 			const eventCount = terminal.events.length;
 
 			terminal.resize(20, 8);
-			await terminal.waitForRender();
+			await terminal.waitForResize();
 			const redrawWrites = terminal.events
 				.slice(eventCount)
 				.filter((event): event is { type: "write"; data: string } => event.type === "write")

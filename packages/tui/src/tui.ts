@@ -782,8 +782,15 @@ export abstract class TuiBase extends Container implements TUI {
 	protected contentChanged = true;
 	private immediateRenderScheduled = false;
 	private renderTimer: NodeJS.Timeout | undefined;
+	private resizeTimer: NodeJS.Timeout | undefined;
 	private lastRenderAt = 0;
 	private static readonly MIN_RENDER_INTERVAL_MS = 16;
+	/**
+	 * A dragged window edge sends a resize per cell step. Rewrapping the transcript for every step blocks
+	 * the loop for tens of milliseconds and never shows an intermediate width, so resizes paint once the
+	 * size holds still.
+	 */
+	private static readonly RESIZE_SETTLE_MS = 80;
 	private showHardwareCursor = false;
 	private clearOnShrink = false;
 	protected fullRedrawCount = 0;
@@ -1224,7 +1231,7 @@ export abstract class TuiBase extends Container implements TUI {
 		this.beforeTerminalStart();
 		this.terminal.start(
 			(data) => this.handleTerminalInput(data),
-			() => this.requestRender(),
+			() => this.handleTerminalResize(),
 		);
 		this.afterTerminalStart();
 		this.terminal.hideCursor();
@@ -1277,6 +1284,7 @@ export abstract class TuiBase extends Container implements TUI {
 		this.stopped = true;
 		process.off("exit", this.exitRestoreHandler);
 		this.cancelRenderTimer();
+		this.cancelResizeTimer();
 		if (this.terminalColorSchemeNotificationsEnabled) {
 			this.terminal.write("\x1b[?2031l");
 		}
@@ -1334,6 +1342,22 @@ export abstract class TuiBase extends Container implements TUI {
 		if (!this.renderTimer) return;
 		clearTimeout(this.renderTimer);
 		this.renderTimer = undefined;
+	}
+
+	/** Paint once the terminal size holds still; see {@link TuiBase.RESIZE_SETTLE_MS}. */
+	private handleTerminalResize(): void {
+		this.cancelResizeTimer();
+		this.resizeTimer = setTimeout(() => {
+			this.resizeTimer = undefined;
+			this.requestRender();
+		}, TuiBase.RESIZE_SETTLE_MS);
+		this.resizeTimer.unref();
+	}
+
+	private cancelResizeTimer(): void {
+		if (!this.resizeTimer) return;
+		clearTimeout(this.resizeTimer);
+		this.resizeTimer = undefined;
 	}
 
 	private scheduleRender(): void {
