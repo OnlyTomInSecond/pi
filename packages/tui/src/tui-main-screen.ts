@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { BoundedTerminalWriter } from "./output-writer.ts";
-import { deleteKittyImage, isImageLine } from "./terminal-image.ts";
+import { deleteKittyImage, getMaxKittyImageRows, isImageLine } from "./terminal-image.ts";
 import {
 	COMMITTED_TUI,
 	type CommittedTUI,
@@ -13,6 +13,9 @@ import {
 	type TuiStopOptions,
 } from "./tui.ts";
 import { visibleWidth } from "./utils.ts";
+
+/** Transcripts up to this many screens are cheap enough to replay on a resize. */
+const REPLAY_SCREENS = 4;
 
 /** OSC 133 prompt markers at the start of a rendered line. Fullscreen uses them for prompt navigation. */
 const OSC133_ZONE_PREFIX = /^(?:\x1b\]133;[ABC](?:\x07|\x1b\\))+/;
@@ -514,10 +517,26 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 			return;
 		}
 
-		// Width changes always need a full re-render because wrapping changes.
+		// Resizing repaints the last screenful: history keeps the rows it has, the way a terminal that
+		// does not reflow keeps them. A Kitty image that starts above the window can only be placed by
+		// a replay, and a width change rewraps history, which reads poorly at mixed widths, so both
+		// replay while the transcript is short enough to rewrite cheaply.
+		const resizeRepaint = (reason: string, replayWhenShort: boolean): void => {
+			logRedraw(reason);
+			const windowStart = Math.max(0, totalLines - height);
+			const replayIsWorthIt = replayWhenShort && totalLines <= height * REPLAY_SCREENS;
+			let imageAboveWindow = false;
+			for (let i = Math.max(0, windowStart - getMaxKittyImageRows()); i < windowStart; i++) {
+				if (isImageLine(lineAt(i))) {
+					imageAboveWindow = true;
+					break;
+				}
+			}
+			fullRender(imageAboveWindow || replayIsWorthIt ? "all" : "window");
+		};
+
 		if (widthChanged) {
-			logRedraw(`terminal width changed (${this.previousWidth} -> ${width})`);
-			fullRender("all");
+			resizeRepaint(`terminal width changed (${this.previousWidth} -> ${width})`, true);
 			return;
 		}
 
@@ -525,8 +544,7 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 		// but Termux changes height when the software keyboard shows or hides.
 		// In that environment, a full redraw causes the entire history to replay on every toggle.
 		if (heightChanged && !isTermuxSession()) {
-			logRedraw(`terminal height changed (${this.previousHeight} -> ${height})`);
-			fullRender("all");
+			resizeRepaint(`terminal height changed (${this.previousHeight} -> ${height})`, false);
 			return;
 		}
 
