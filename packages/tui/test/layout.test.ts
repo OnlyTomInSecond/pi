@@ -6,6 +6,7 @@ import { Text } from "../src/components/text.ts";
 import { VStack } from "../src/components/v-stack.ts";
 import { renderLayoutFrame } from "../src/layout.ts";
 import { encodeKitty, registerKittyImageMetadata } from "../src/terminal-image.ts";
+import { Container, rowAt, rowsHeight } from "../src/tui.ts";
 import { stripTerminalSequences } from "../src/utils.ts";
 
 function visibleLines(lines: string[]): string[] {
@@ -68,6 +69,23 @@ describe("viewport layout", () => {
 		]);
 		renderLayoutFrame(root, 10, 3, () => {});
 		assert.strictEqual(renderCount, 1);
+	});
+
+	it("paints a scroll body from a row index instead of a flattened array", () => {
+		const body = new Container();
+		body.addChild(new Text("one\ntwo", 0, 0));
+		body.addChild(new Text("three", 0, 0));
+		const transcript = new ScrollView(body, { follow: "end" });
+
+		const frame = renderLayoutFrame(transcript, 10, 2, () => {});
+		assert.deepStrictEqual(visibleLines(frame.lines), ["two", "three"]);
+
+		const rows = frame.root.children[0]?.rows;
+		assert.ok(frame.root.children[0]?.component === body, "the body is laid out as the scroll content");
+		assert.ok(rows !== undefined && !Array.isArray(rows), "a scroll body is addressed by rows, not flattened");
+		assert.strictEqual(rowsHeight(rows), 3);
+		assert.strictEqual(rowAt(rows, 2)?.trimEnd(), "three");
+		assert.strictEqual(rowAt(rows, 3), undefined);
 	});
 
 	it("paints only clipped rows from very large scroll content", () => {
@@ -383,7 +401,7 @@ describe("viewport layout", () => {
 		text.setText("one\ntwo\nthree");
 		const second = renderLayoutFrame(root, 10, 4, () => {});
 
-		assert.strictEqual(first.root.children[0]?.lines?.length, 1);
-		assert.strictEqual(second.root.children[0]?.lines?.length, 3);
+		assert.strictEqual(first.root.children[0]?.rows && rowsHeight(first.root.children[0]!.rows), 1);
+		assert.strictEqual(second.root.children[0]?.rows && rowsHeight(second.root.children[0]!.rows), 3);
 	});
 });

@@ -2,7 +2,7 @@ import type { ScrollView } from "./components/scroll-view.ts";
 import { allocateStackSizes, visibleStackEntries } from "./components/stack.ts";
 import { getLayoutNode } from "./layout-node.ts";
 import { cropKittyImageLine, getKittyImageMetadata, getMaxKittyImageRows, isImageLine } from "./terminal-image.ts";
-import { type Component, CURSOR_MARKER, compositeTuiLine } from "./tui.ts";
+import { type Component, CURSOR_MARKER, compositeTuiLine, type RenderedRows, rowAt, rowsHeight } from "./tui.ts";
 import {
 	extractAnsiCode,
 	getActiveBackgroundAnsi,
@@ -26,15 +26,17 @@ export interface LayoutBox {
 	clip: LayoutRect;
 	children: LayoutBox[];
 	parent?: LayoutBox;
-	lines?: readonly string[];
+	/** Rendered output of this box, or a row index for a tree the layout did not flatten. */
+	rows?: RenderedRows;
 	lineOffset?: number;
 	scrollView?: ScrollView;
-	scrollContentLines?: readonly string[];
+	/** Rendered content of a scroll view, addressed by content row. */
+	scrollContent?: RenderedRows;
 	layer: number;
 }
 
 /** Component output by width, as rendered for one layout frame. */
-export type LayoutRenderCache = Map<Component, Map<number, readonly string[]>>;
+export type LayoutRenderCache = Map<Component, Map<number, RenderedRows>>;
 
 export interface LayoutFrame {
 	root: LayoutBox;
@@ -72,27 +74,39 @@ function intersect(a: LayoutRect, b: LayoutRect): LayoutRect {
 	return { x, y, width: Math.max(0, right - x), height: Math.max(0, bottom - y) };
 }
 
-function renderCached(context: LayoutContext, component: Component, width: number): readonly string[] {
+function renderCached(context: LayoutContext, component: Component, width: number, indexable: boolean): RenderedRows {
 	const safeWidth = Math.max(1, Math.floor(width));
 	let widths = context.renderCache.get(component);
 	if (!widths) {
-		widths = new Map<number, readonly string[]>();
+		widths = new Map<number, RenderedRows>();
 		context.renderCache.set(component, widths);
 	}
-	let lines = widths.get(safeWidth);
-	if (!lines) {
-		lines = context.reusableOutput?.get(component)?.get(safeWidth) ?? component.render(safeWidth);
-		widths.set(safeWidth, lines);
+	let rows = widths.get(safeWidth) ?? context.reusableOutput?.get(component)?.get(safeWidth);
+	if (rows === undefined) {
+		rows = (indexable ? component.renderRows?.(safeWidth) : undefined) ?? component.render(safeWidth);
 	}
-	return lines;
+	widths.set(safeWidth, rows);
+	return rows;
 }
 
+/** Height of a component, from its rows alone: a tree that is not flattened is never flattened here. */
 function measureHeight(context: LayoutContext, component: Component, width: number): number {
-	return renderCached(context, component, width).length;
+	return rowsHeight(renderCached(context, component, width, true));
 }
 
 function measureWidth(context: LayoutContext, component: Component, width: number): number {
-	return renderCached(context, component, width).reduce((max, line) => Math.max(max, visibleWidth(line)), 0);
+	const rows = renderCached(context, component, width, false);
+	let max = 0;
+	for (let row = 0; row < rowsHeight(rows); row++) max = Math.max(max, visibleWidth(rowAt(rows, row) ?? ""));
+	return max;
+}
+
+/** Row of the hardware cursor marker, or -1 when the output has none. */
+function findCursorRow(rows: RenderedRows): number {
+	for (let row = 0; row < rowsHeight(rows); row++) {
+		if (rowAt(rows, row)?.includes(CURSOR_MARKER)) return row;
+	}
+	return -1;
 }
 
 function withParent(box: LayoutBox, parent: LayoutBox): LayoutBox {
@@ -122,19 +136,22 @@ function layoutComponent(
 	const safeWidth = Math.max(1, Math.floor(width));
 	const node = getLayoutNode(component);
 	if (!node) {
-		const lines = renderCached(context, component, safeWidth);
-		const allocatedHeight = height === undefined ? lines.length : Math.max(0, Math.floor(height));
+		// A clipped box can hide the cursor row and needs its lines; an unclipped one is painted from rows,
+		// so a large tree behind it is never flattened.
+		const rows = renderCached(context, component, safeWidth, height === undefined);
+		const naturalHeight = rowsHeight(rows);
+		const allocatedHeight = height === undefined ? naturalHeight : Math.max(0, Math.floor(height));
 		let lineOffset = 0;
-		if (lines.length > allocatedHeight && allocatedHeight > 0) {
-			const cursorLine = lines.findIndex((line) => line.includes(CURSOR_MARKER));
-			if (cursorLine >= allocatedHeight) lineOffset = cursorLine - allocatedHeight + 1;
+		if (naturalHeight > allocatedHeight && allocatedHeight > 0) {
+			const cursorRow = findCursorRow(rows);
+			if (cursorRow >= allocatedHeight) lineOffset = cursorRow - allocatedHeight + 1;
 		}
 		return {
 			component,
 			rect: { x, y, width: safeWidth, height: allocatedHeight },
 			clip: intersect(clip, { x, y, width: safeWidth, height: allocatedHeight }),
 			children: [],
-			lines,
+			rows,
 			lineOffset,
 			layer: 0,
 		};
@@ -166,7 +183,7 @@ function layoutComponent(
 			clip: childClip,
 			children: [childBox],
 			scrollView,
-			scrollContentLines: renderCached(context, node.component, contentWidth),
+			scrollContent: renderCached(context, node.component, contentWidth, true),
 			layer: 0,
 		};
 		childBox.parent = box;
@@ -287,7 +304,8 @@ function replaceScrollbarCell(
 export function getScrollbarGeometry(box: LayoutBox, includeHiddenAuto = false): ScrollbarGeometry | undefined {
 	if (!box.scrollView || box.rect.width <= 0 || box.rect.height <= 0) return undefined;
 
-	const contentHeight = box.children[0]?.rect.height ?? box.scrollContentLines?.length ?? 0;
+	const contentHeight =
+		box.children[0]?.rect.height ?? (box.scrollContent === undefined ? 0 : rowsHeight(box.scrollContent));
 	const trackHeight = box.rect.height;
 	const canRevealHiddenAuto = includeHiddenAuto && box.scrollView.scrollbar === "auto" && contentHeight > trackHeight;
 	if (!box.scrollView.isScrollbarVisible && !canRevealHiddenAuto) return undefined;
@@ -364,12 +382,12 @@ function paintScrollbar(box: LayoutBox, screen: string[], totalWidth: number): v
 }
 
 function paintBox(box: LayoutBox, screen: string[], totalWidth: number): void {
-	if (box.lines) {
+	if (box.rows) {
 		const offset = box.lineOffset ?? 0;
 		const firstRow = Math.max(box.rect.y, box.clip.y, 0);
 		const lastRow = Math.min(box.rect.y + box.rect.height, box.clip.y + box.clip.height, screen.length);
 		for (let row = firstRow; row < lastRow; row++) {
-			const sourceLine = box.lines[offset + row - box.rect.y];
+			const sourceLine = rowAt(box.rows, offset + row - box.rect.y);
 			if (sourceLine === undefined) continue;
 			let line = sourceLine.replace(OSC133_ZONE_PREFIX, "");
 			const imageMetadata = getKittyImageMetadata(line);
@@ -392,14 +410,14 @@ function paintBox(box: LayoutBox, screen: string[], totalWidth: number): void {
 	}
 	for (const child of box.children) paintBox(child, screen, totalWidth);
 
-	if (box.scrollView && box.scrollContentLines && box.scrollView.scrollTop > 0 && box.rect.height > 0) {
+	if (box.scrollView && box.scrollContent && box.scrollView.scrollTop > 0 && box.rect.height > 0) {
 		// Find the nearest image line above the viewport. Placeholder rows below an
 		// image line may contain padding, borders, or side-by-side text, so the search
 		// is bounded by the tallest registered image instead of by row content.
 		const scrollTop = box.scrollView.scrollTop;
 		const minRow = Math.max(0, scrollTop - getMaxKittyImageRows());
 		for (let imageRow = scrollTop - 1; imageRow >= minRow; imageRow--) {
-			const imageLine = box.scrollContentLines[imageRow] ?? "";
+			const imageLine = rowAt(box.scrollContent, imageRow) ?? "";
 			if (!isImageLine(imageLine)) continue;
 			const metadata = getKittyImageMetadata(imageLine);
 			if (!metadata) continue;

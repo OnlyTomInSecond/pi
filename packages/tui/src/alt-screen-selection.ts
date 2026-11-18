@@ -1,6 +1,7 @@
 import type { ScrollView } from "./components/scroll-view.ts";
 import { getScrollViewBox, getScrollViewsAt, type LayoutFrame } from "./layout.ts";
 import { isImageLine } from "./terminal-image.ts";
+import { rowAt, rowsHeight } from "./tui.ts";
 import {
 	extractAnsiCode,
 	getGraphemeCellRange,
@@ -392,7 +393,7 @@ export class AltScreenSelection {
 		);
 		if (visibleBottom < visibleTop) return undefined;
 		const pointerRow = Math.max(visibleTop, Math.min(visibleBottom, y));
-		const maxContentRow = Math.max(0, (box.scrollContentLines?.length ?? 1) - 1);
+		const maxContentRow = Math.max(0, (box.scrollContent === undefined ? 1 : rowsHeight(box.scrollContent)) - 1);
 		return {
 			row: Math.max(0, Math.min(maxContentRow, scrollView.scrollTop + pointerRow - box.rect.y)),
 			col: Math.max(0, Math.min(box.rect.width - 1, x - box.rect.x)),
@@ -414,8 +415,8 @@ export class AltScreenSelection {
 	private getSelectionSourceLine(point: SelectionPoint): string {
 		const layout = this.host.getLayout();
 		if (point.scrollView && layout) {
-			const lines = getScrollViewBox(layout, point.scrollView)?.scrollContentLines;
-			if (lines) return lines[point.row] ?? "";
+			const content = getScrollViewBox(layout, point.scrollView)?.scrollContent;
+			if (content) return rowAt(content, point.row) ?? "";
 		}
 		return this.host.getScreen()[point.row] ?? "";
 	}
@@ -529,17 +530,17 @@ export class AltScreenSelection {
 	private getActiveSelectionText(): string | undefined {
 		const selection = getSelectionBounds(this.selectionAnchor, this.selectionFocus);
 		if (!selection) return undefined;
-		let sourceLines: readonly string[] = this.host.getScreen();
+		let sourceLine = (row: number): string => this.host.getScreen()[row] ?? "";
 		if (selection.start.scrollView) {
 			const layout = this.host.getLayout();
 			if (!layout) return undefined;
-			const box = getScrollViewBox(layout, selection.start.scrollView);
-			if (!box?.scrollContentLines) return undefined;
-			sourceLines = box.scrollContentLines;
+			const content = getScrollViewBox(layout, selection.start.scrollView)?.scrollContent;
+			if (!content) return undefined;
+			sourceLine = (row: number) => rowAt(content, row) ?? "";
 		}
 		const lines: string[] = [];
 		for (let row = selection.start.row; row <= selection.end.row; row++) {
-			const line = sourceLines[row] ?? "";
+			const line = sourceLine(row);
 			const columns = getSelectionColumns(line, row, selection);
 			lines.push(
 				stripTerminalSequences(

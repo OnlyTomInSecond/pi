@@ -1,6 +1,6 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
-import { type Component, Container } from "../src/tui.ts";
+import { type Component, Container, rowAt, rowsHeight } from "../src/tui.ts";
 
 class Lines implements Component {
 	lines: string[];
@@ -42,5 +42,38 @@ describe("Container render reuse", () => {
 		assert.deepStrictEqual(container.render(20), ["a", "b"]);
 		assert.notStrictEqual(container.render(20), frame);
 		assert.deepStrictEqual(container.render(10), ["a", "b"], "width change rebuilds");
+	});
+
+	it("addresses child lines by row without flattening them", () => {
+		const container = new Container();
+		const first = new Lines(["a", "b"]);
+		const second = new Lines(["c"]);
+		container.addChild(first);
+		container.addChild(second);
+
+		const rows = container.renderRows(20);
+		assert.strictEqual(rowsHeight(rows), 3);
+		assert.deepStrictEqual(
+			[0, 1, 2, 3].map((row) => rowAt(rows, row)),
+			["a", "b", "c", undefined],
+		);
+		assert.strictEqual(container.renderRows(20), rows, "unchanged children keep the index");
+
+		second.lines = ["c", "d"];
+		const changed = container.renderRows(20);
+		assert.notStrictEqual(changed, rows, "a changed child rebuilds the index");
+		assert.strictEqual(rowsHeight(changed), 4);
+		assert.strictEqual(rowAt(changed, 3), "d");
+	});
+
+	it("answers with its own output when a subclass renders it", () => {
+		class Overridden extends Container {
+			override render(): readonly string[] {
+				return ["custom"];
+			}
+		}
+		const container = new Overridden();
+		container.addChild(new Lines(["child"]));
+		assert.deepStrictEqual(container.renderRows(20), ["custom"]);
 	});
 });

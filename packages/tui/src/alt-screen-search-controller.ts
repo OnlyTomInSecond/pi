@@ -160,8 +160,8 @@ export class AltScreenSearch {
 		if (!search) return false;
 		const scrollView = layout.primaryScrollView ?? this.host.getImplicitScrollView();
 		const box = getScrollViewBox(layout, scrollView);
-		const lines = box?.scrollContentLines;
-		if (!lines || !search.query.trim()) {
+		const content = box?.scrollContent;
+		if (!content || !search.query.trim()) {
 			search.matches = [];
 			search.selectedIndex = -1;
 			search.selectedKey = undefined;
@@ -171,7 +171,7 @@ export class AltScreenSearch {
 		}
 
 		const shouldRevealSelection = search.selectionMode !== "retain";
-		const result = search.index.search(lines, search.query);
+		const result = search.index.search(content, search.query);
 		const matches = result.matches;
 		search.matches = matches;
 		if (!result.changed && search.selectionMode === "retain") return false;

@@ -121,6 +121,30 @@ export function retargetMouseEvent(event: TuiMouseEvent, target: TuiMouseDispatc
 	};
 }
 
+/**
+ * Rendered rows addressed by index. A container implements it so a renderer can read the rows it
+ * paints without flattening the whole tree first.
+ */
+export interface RowIndex {
+	/** Number of rendered rows. */
+	readonly height: number;
+	/** The row at `row` (zero-based), or `undefined` past the end. */
+	lineAt(row: number): string | undefined;
+}
+
+/** Component output as rows: the lines array, or a {@link RowIndex} for a tree that is not flattened. */
+export type RenderedRows = readonly string[] | RowIndex;
+
+/** Number of rows in component output. */
+export function rowsHeight(rows: RenderedRows): number {
+	return "height" in rows ? rows.height : rows.length;
+}
+
+/** The row at `row` of component output, or `undefined` past the end. */
+export function rowAt(rows: RenderedRows, row: number): string | undefined {
+	return "height" in rows ? rows.lineAt(row) : rows[row];
+}
+
 export interface Component {
 	/**
 	 * Render the component to lines for the given viewport width
@@ -128,6 +152,13 @@ export interface Component {
 	 * @returns Lines to draw. Components may return a cached array: callers must not modify it.
 	 */
 	render(width: number): readonly string[];
+
+	/**
+	 * Optional: render rows into an index instead of a flattened array. The layout asks for it where it
+	 * needs only some rows of a possibly large tree, such as a scroll body. Callers must not modify the
+	 * index or the arrays it returns.
+	 */
+	renderRows?(width: number): RenderedRows;
 
 	/** Optional handler for keyboard input when component has focus. */
 	handleInput?(data: string): void;
@@ -374,8 +405,8 @@ type ActiveOverlayFocusRestoreState = EligibleOverlayFocusRestoreState | Blocked
 type OverlayFocusRestoreState = { status: "inactive" } | ActiveOverlayFocusRestoreState;
 type OverlayFocusRestorePolicy = "clear" | "preserve";
 
-/** Concatenated child output of a container, kept across frames. */
-export interface ChildLines {
+/** Rendered children of one container at one width. */
+interface ChildLayout {
 	readonly width: number;
 	/** The children of this frame; a replacement is detected even when it renders the same lines. */
 	readonly children: readonly Component[];
@@ -383,23 +414,23 @@ export interface ChildLines {
 	readonly parts: readonly (readonly string[])[];
 	/** Rendered height of each child, in child order. */
 	readonly heights: readonly number[];
+}
+
+/** Concatenated child output of a container, kept across frames. */
+export interface ChildLines extends ChildLayout {
 	readonly lines: string[];
 }
 
 /**
- * Render children and concatenate their lines.
- *
- * Returns `previous` unchanged when every child kept its place and returned its last array. Unchanged
- * subtrees then keep array identity, so every ancestor container skips its copy too. When a child
- * changed, only the children from the first changed one on are copied: streaming appends to the last
- * child, so a long transcript frame copies its growing tail instead of every line.
- * Callers must treat the returned lines as read-only, like any component's cached render output.
+ * Render the children of one frame. Returns `undefined` when every child kept its place and returned
+ * its last array, so the caller's previous layout still applies. Unchanged subtrees then keep array
+ * identity, so every ancestor container skips its copy too.
  */
-export function renderChildLines(
+function layoutChildren(
 	children: readonly Component[],
 	width: number,
-	previous: ChildLines | undefined,
-): ChildLines {
+	previous: ChildLayout | undefined,
+): (ChildLayout & { firstChanged: number; unchangedLines: number }) | undefined {
 	const reusable = previous !== undefined && previous.width === width && previous.children.length === children.length;
 	const parts: (readonly string[])[] = reusable ? previous.parts.slice() : new Array(children.length);
 	const heights: number[] = reusable ? previous.heights.slice() : new Array(children.length);
@@ -417,12 +448,71 @@ export function renderChildLines(
 		heights[index] = lines.length;
 		if (firstChanged === -1) unchangedLines += lines.length;
 	}
-	if (firstChanged === -1) return previous!;
-	const lines = firstChanged === 0 ? [] : previous!.lines.slice(0, unchangedLines);
-	for (let index = firstChanged; index < parts.length; index++) {
-		for (const line of parts[index]!) lines.push(line);
+	if (firstChanged === -1) return undefined;
+	return { width, children: [...children], parts, heights, firstChanged, unchangedLines };
+}
+
+/**
+ * Render children and concatenate their lines.
+ *
+ * Returns `previous` unchanged when every child kept its place and returned its last array. When a
+ * child changed, only the children from the first changed one on are copied: streaming appends to the
+ * last child, so a long transcript frame copies its growing tail instead of every line.
+ * Callers must treat the returned lines as read-only, like any component's cached render output.
+ */
+export function renderChildLines(
+	children: readonly Component[],
+	width: number,
+	previous: ChildLines | undefined,
+): ChildLines {
+	const layout = layoutChildren(children, width, previous);
+	if (!layout) return previous!;
+	const lines = layout.firstChanged === 0 ? [] : previous!.lines.slice(0, layout.unchangedLines);
+	for (let index = layout.firstChanged; index < layout.parts.length; index++) {
+		for (const line of layout.parts[index]!) lines.push(line);
 	}
-	return { width, children: [...children], parts, heights, lines };
+	return { width, children: layout.children, parts: layout.parts, heights: layout.heights, lines };
+}
+
+/**
+ * Child lines addressed by content row. Prefix sums of the child heights map a row to its child, so
+ * painting a viewport reads only the rows it paints.
+ */
+class ChildRowIndex implements RowIndex, ChildLayout {
+	readonly width: number;
+	readonly children: readonly Component[];
+	readonly parts: readonly (readonly string[])[];
+	readonly heights: readonly number[];
+	readonly height: number;
+	/** First content row of each child, in child order. */
+	private readonly starts: readonly number[];
+
+	constructor(layout: ChildLayout) {
+		this.width = layout.width;
+		this.children = layout.children;
+		this.parts = layout.parts;
+		this.heights = layout.heights;
+		const starts = new Array<number>(layout.heights.length);
+		let row = 0;
+		for (let index = 0; index < layout.heights.length; index++) {
+			starts[index] = row;
+			row += layout.heights[index]!;
+		}
+		this.starts = starts;
+		this.height = row;
+	}
+
+	lineAt(row: number): string | undefined {
+		if (row < 0 || row >= this.height) return undefined;
+		let low = 0;
+		let high = this.starts.length - 1;
+		while (low < high) {
+			const middle = (low + high + 1) >> 1;
+			if (this.starts[middle]! <= row) low = middle;
+			else high = middle - 1;
+		}
+		return this.parts[low]![row - this.starts[low]!];
+	}
 }
 
 /** Dispatch a mouse event to the child of a vertical child layout that covers its row. */
@@ -452,10 +542,12 @@ export class Container implements Component {
 	 * Commit frames this way render in O(children) instead of copying every transcript line.
 	 */
 	private childLines?: ChildLines;
+	private childRows?: ChildRowIndex;
 
 	addChild(component: Component): void {
 		this.children.push(component);
 		this.childLines = undefined;
+		this.childRows = undefined;
 	}
 
 	removeChild(component: Component): void {
@@ -463,16 +555,19 @@ export class Container implements Component {
 		if (index !== -1) {
 			this.children.splice(index, 1);
 			this.childLines = undefined;
+			this.childRows = undefined;
 		}
 	}
 
 	clear(): void {
 		this.children = [];
 		this.childLines = undefined;
+		this.childRows = undefined;
 	}
 
 	invalidate(): void {
 		this.childLines = undefined;
+		this.childRows = undefined;
 		for (const child of this.children) {
 			child.invalidate?.();
 		}
@@ -480,6 +575,7 @@ export class Container implements Component {
 
 	releaseRenderCache(): void {
 		this.childLines = undefined;
+		this.childRows = undefined;
 		for (const child of this.children) {
 			child.releaseRenderCache?.();
 		}
@@ -508,6 +604,20 @@ export class Container implements Component {
 	render(width: number): readonly string[] {
 		this.childLines = renderChildLines(this.children, width, this.childLines);
 		return this.childLines.lines;
+	}
+
+	/**
+	 * Rows of the children without their flattened array, for renderers that paint only a viewport.
+	 * Kept apart from `render()`: a frame that asks for one does not re-render the other.
+	 */
+	renderRows(width: number): RenderedRows {
+		// A subclass with its own render() output cannot be addressed by its children, so it answers with
+		// that output.
+		if (this.render !== Container.prototype.render) return this.render(width);
+		const next = layoutChildren(this.children, width, this.childRows);
+		// `layoutChildren` returns nothing only for a previous layout of the same children and width.
+		if (next) this.childRows = new ChildRowIndex(next);
+		return this.childRows!;
 	}
 }
 

@@ -35,6 +35,8 @@ import {
 	compositeTuiLine,
 	dispatchMouseEvent,
 	retargetMouseEvent,
+	rowAt,
+	rowsHeight,
 	TuiBase,
 	type TuiMouseButton,
 	type TuiMouseDispatchResult,
@@ -474,11 +476,11 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	private scrollToPrompt(direction: -1 | 1): void {
 		if (!this.currentLayout) return;
 		const scrollView = this.getPrimaryScrollView();
-		const lines = getScrollViewBox(this.currentLayout, scrollView)?.scrollContentLines;
-		if (!lines) return;
+		const content = getScrollViewBox(this.currentLayout, scrollView)?.scrollContent;
+		if (!content) return;
 
-		for (let row = scrollView.scrollTop + direction; row >= 0 && row < lines.length; row += direction) {
-			if (!OSC133_PROMPT_START.test(lines[row] ?? "")) continue;
+		for (let row = scrollView.scrollTop + direction; row >= 0 && row < rowsHeight(content); row += direction) {
+			if (!OSC133_PROMPT_START.test(rowAt(content, row) ?? "")) continue;
 			scrollView.scrollTo(row);
 			this.requestViewRender();
 			return;

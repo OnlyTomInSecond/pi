@@ -1,6 +1,7 @@
 import { Input } from "./components/input.ts";
 import { getKeybindings } from "./keybindings.ts";
-import type { Component, Focusable } from "./tui.ts";
+import type { Component, Focusable, RenderedRows } from "./tui.ts";
+import { rowAt, rowsHeight } from "./tui.ts";
 import { getGraphemeSegmenter, stripTerminalSequences, truncateToWidth, visibleWidth } from "./utils.ts";
 
 const segmenter = getGraphemeSegmenter();
@@ -31,7 +32,7 @@ export interface AltScreenSearchMatch {
 
 const PRINTABLE_ASCII = /^[\x20-\x7e]*$/;
 
-function buildSearchCorpus(lines: readonly string[]): SearchCorpus {
+function buildSearchCorpus(rows: RenderedRows): SearchCorpus {
 	const chunks: string[] = [];
 	const spans: SearchSourceSpan[] = [];
 	let textLength = 0;
@@ -44,8 +45,8 @@ function buildSearchCorpus(lines: readonly string[]): SearchCorpus {
 		pendingSeparator = false;
 	};
 
-	for (let row = 0; row < lines.length; row++) {
-		const line = stripTerminalSequences(lines[row] ?? "");
+	for (let row = 0; row < rowsHeight(rows); row++) {
+		const line = stripTerminalSequences(rowAt(rows, row) ?? "");
 		let column = 0;
 
 		// Rendered transcripts are overwhelmingly ASCII. Index complete non-space
@@ -152,25 +153,18 @@ export interface AltScreenSearchResult {
 	changed: boolean;
 }
 
-/** Cache the searchable corpus and matches while rendered transcript lines remain unchanged. */
+/** Cache the searchable corpus and matches while the rendered transcript remains unchanged. */
 export class AltScreenSearchIndex {
-	private sourceLines: string[] | undefined;
+	private source: RenderedRows | undefined;
 	private corpus: SearchCorpus | undefined;
 	private normalizedQuery: string | undefined;
 	private matches: AltScreenSearchMatch[] = [];
 
-	search(lines: readonly string[], query: string): AltScreenSearchResult {
-		let sourceChanged = this.sourceLines?.length !== lines.length;
-		if (!sourceChanged && this.sourceLines) {
-			for (let index = 0; index < lines.length; index++) {
-				if (this.sourceLines[index] === lines[index]) continue;
-				sourceChanged = true;
-				break;
-			}
-		}
+	search(rows: RenderedRows, query: string): AltScreenSearchResult {
+		const sourceChanged = !this.isSameSource(rows);
+		this.source = rows;
 		if (sourceChanged || !this.corpus) {
-			this.sourceLines = Array.from(lines);
-			this.corpus = buildSearchCorpus(lines);
+			this.corpus = buildSearchCorpus(rows);
 		}
 
 		const normalizedQuery = normalizeQuery(query);
@@ -181,11 +175,27 @@ export class AltScreenSearchIndex {
 		}
 		return { matches: this.matches, changed };
 	}
+
+	/**
+	 * Whether the transcript is the output the corpus was built from. The layout hands back its cached
+	 * output, so the same reference is the common case; a rebuilt output is compared row by row.
+	 */
+	private isSameSource(rows: RenderedRows): boolean {
+		const previous = this.source;
+		if (!previous) return false;
+		if (previous === rows) return true;
+		const height = rowsHeight(rows);
+		if (rowsHeight(previous) !== height) return false;
+		for (let row = 0; row < height; row++) {
+			if (rowAt(previous, row) !== rowAt(rows, row)) return false;
+		}
+		return true;
+	}
 }
 
-export function findAltScreenSearchMatches(lines: readonly string[], query: string): AltScreenSearchMatch[] {
+export function findAltScreenSearchMatches(rows: RenderedRows, query: string): AltScreenSearchMatch[] {
 	const normalizedQuery = normalizeQuery(query);
-	return normalizedQuery ? findSearchCorpusMatches(buildSearchCorpus(lines), normalizedQuery) : [];
+	return normalizedQuery ? findSearchCorpusMatches(buildSearchCorpus(rows), normalizedQuery) : [];
 }
 
 export function getAltScreenSearchMatchKey(match: AltScreenSearchMatch): string {
