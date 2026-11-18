@@ -102,6 +102,17 @@ interface ScrollToEndIndicatorRect {
 	width: number;
 }
 
+/** A vertical shift of one scroll view's content that a single scroll command can apply. */
+interface RegionScroll {
+	/** First and last screen row of the scrolled region. */
+	top: number;
+	bottom: number;
+	/** Logical rows moved: positive scrolls the content up, exposing rows at the bottom. */
+	lines: number;
+	/** What each screen row shows after the scroll, or `undefined` where the scroll exposes new rows. */
+	rows: (string | undefined)[];
+}
+
 export interface TuiAltScreenOptions {
 	/**
 	 * Logical lines moved for each mouse-wheel event (default: 1). `"auto"` accelerates fast wheel
@@ -140,6 +151,9 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	readonly mode = "fullscreen" as const;
 	readonly [VIEWPORT_TUI] = true as const;
 	private previousScreen: string[] = [];
+	/** Scroll position of the primary scroll view when `previousScreen` was painted. */
+	private previousScrollTop = 0;
+	private previousPrimaryScrollView: ScrollView | undefined;
 	private lastDocument: string[] = [];
 	private previousScreenWidth = 0;
 	private previousScreenHeight = 0;
@@ -453,6 +467,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 	protected override resetRenderState(): void {
 		this.previousScreen = [];
+		this.previousScrollTop = 0;
+		this.previousPrimaryScrollView = undefined;
 		this.previousScreenWidth = 0;
 		this.previousScreenHeight = 0;
 		this.currentLayout = undefined;
@@ -874,6 +890,39 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		return result;
 	}
 
+	/**
+	 * Plan a region scroll for a frame that moved the primary scroll view's content. The plan shifts the
+	 * previous screen by the scrolled rows, so the row diff writes only the rows the scroll exposes and
+	 * the rows that differ from the moved content.
+	 *
+	 * Skipped for images, which do not scroll with the text on every terminal, and when the shifted rows
+	 * do not mostly match: content that grew above the viewport moves the scroll position without moving
+	 * a row, so the scroll command would only be paid for and undone by row writes.
+	 */
+	private planRegionScroll(layout: LayoutFrame, screen: string[], height: number): RegionScroll | undefined {
+		const scrollView = layout.primaryScrollView;
+		if (!scrollView || scrollView !== this.previousPrimaryScrollView) return undefined;
+		const lines = scrollView.scrollTop - this.previousScrollTop;
+		if (lines === 0) return undefined;
+		const box = getScrollViewBox(layout, scrollView);
+		if (!box) return undefined;
+		const top = Math.max(0, box.clip.y);
+		const bottom = Math.min(height, box.clip.y + box.clip.height) - 1;
+		if (bottom - top + 1 <= Math.abs(lines)) return undefined;
+		if (screen.some(isImageLine) || this.previousScreen.some(isImageLine)) return undefined;
+
+		const rows: (string | undefined)[] = new Array(height);
+		let matched = 0;
+		for (let row = 0; row < height; row++) {
+			// The region scroll moves rows inside the region only; outside it every row keeps its place.
+			const source = row < top || row > bottom ? row : row + lines;
+			rows[row] = source < top || source > bottom ? undefined : this.previousScreen[source];
+			if (rows[row] !== undefined && screen[row] === rows[row]) matched += 1;
+		}
+		if (matched * 2 <= bottom - top + 1) return undefined;
+		return { top, bottom, lines, rows };
+	}
+
 	private compositeFlashes(screen: string[], width: number, height: number): string[] {
 		const flashLines = this.flashes.render(width).slice(-height);
 		if (flashLines.length === 0) return screen;
@@ -919,7 +968,9 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 		const fullRedraw =
 			this.previousScreen.length === 0 || this.previousScreenWidth !== width || this.previousScreenHeight !== height;
-		const changedRows = screen.map((line, row) => line !== this.previousScreen[row]);
+		const regionScroll = fullRedraw ? undefined : this.planRegionScroll(nextLayout, screen, height);
+		const previousRows = regionScroll?.rows ?? this.previousScreen;
+		const changedRows = screen.map((line, row) => line !== previousRows[row]);
 		const imageAnchorsNeedRedraw = screen.some(
 			(line, row) => changedRows[row] && (isImageLine(line) || isImageLine(this.previousScreen[row] ?? "")),
 		);
@@ -959,6 +1010,14 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			else if (this.imageProtocol === "kitty") output.append(deleteAllKittyPlacements());
 		}
 		output.append(preparedKittyScreen.evictedImageDeletion);
+		if (regionScroll) {
+			// Scroll the region in place: one command instead of rewriting every row it moved. Rows the
+			// scroll exposes, and rows that differ from the shifted content, are written below.
+			const command = regionScroll.lines > 0 ? `${regionScroll.lines}S` : `${-regionScroll.lines}T`;
+			output.append(
+				`\x1b[${regionScroll.top + 1};${regionScroll.bottom + 1}r\x1b[${regionScroll.top + 1};1H\x1b[${command}\x1b[r`,
+			);
+		}
 
 		// Some terminals store Kitty images in the cells they cover (WezTerm, xterm.js's image addon in Orca),
 		// so clearing or writing a covered row erases that part of the image. Draw placements after every clear
@@ -967,22 +1026,22 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const drawKittyImagesLast = redrawImages && this.imageProtocol === "kitty" && screen.some(isImageLine);
 		if (drawKittyImagesLast) {
 			for (let row = 0; row < height; row++) {
-				if (!fullRedraw && !imagesNeedRedraw && screen[row] === this.previousScreen[row]) continue;
+				if (!fullRedraw && !imagesNeedRedraw && !changedRows[row]) continue;
 				output.append(`\x1b[${row + 1};1H\x1b[2K`);
 			}
 			for (let row = 0; row < height; row++) {
-				if (!fullRedraw && !imagesNeedRedraw && screen[row] === this.previousScreen[row]) continue;
+				if (!fullRedraw && !imagesNeedRedraw && !changedRows[row]) continue;
 				if (isImageLine(preparedKittyScreen.lines[row] ?? "")) continue;
 				output.append(`\x1b[${row + 1};1H${preparedKittyScreen.lines[row] ?? ""}`);
 			}
 			for (let row = 0; row < height; row++) {
-				if (!fullRedraw && !imagesNeedRedraw && screen[row] === this.previousScreen[row]) continue;
+				if (!fullRedraw && !imagesNeedRedraw && !changedRows[row]) continue;
 				if (!isImageLine(preparedKittyScreen.lines[row] ?? "")) continue;
 				output.append(`\x1b[${row + 1};1H${preparedKittyScreen.lines[row] ?? ""}`);
 			}
 		} else {
 			for (let row = 0; row < height; row++) {
-				if (!fullRedraw && !imagesNeedRedraw && screen[row] === this.previousScreen[row]) continue;
+				if (!fullRedraw && !imagesNeedRedraw && !changedRows[row]) continue;
 				output.append(`\x1b[${row + 1};1H\x1b[2K${preparedKittyScreen.lines[row] ?? ""}`);
 			}
 		}
@@ -997,6 +1056,8 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		output.flush();
 
 		this.previousScreen = screen;
+		this.previousScrollTop = nextLayout.primaryScrollView?.scrollTop ?? 0;
+		this.previousPrimaryScrollView = nextLayout.primaryScrollView;
 		this.previousScreenWidth = width;
 		this.previousScreenHeight = height;
 		this.currentLayout = nextLayout;

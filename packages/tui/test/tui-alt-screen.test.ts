@@ -22,7 +22,7 @@ import {
 	resetCapabilitiesCache,
 	setCapabilities,
 } from "../src/terminal-image.ts";
-import { CURSOR_MARKER, renderFakeCursor, type TuiMouseEvent } from "../src/tui.ts";
+import { Container, CURSOR_MARKER, renderFakeCursor, type TuiMouseEvent } from "../src/tui.ts";
 import { TuiAltScreen } from "../src/tui-alt-screen.ts";
 import { stripTerminalSequences, visibleWidth } from "../src/utils.ts";
 import { defaultEditorTheme } from "./test-themes.ts";
@@ -2426,6 +2426,157 @@ describe("TuiAltScreen", () => {
 		terminal.sendInput("\x1b[5~"); // PageUp scrolls the transcript again
 		await terminal.waitForRender();
 		assert.ok(tui.viewportTop < topWithoutMenu);
+		tui.stop();
+	});
+});
+
+describe("TuiAltScreen region scroll", () => {
+	const buildViewport = (scrollbar: "hidden" | "always" = "hidden") => {
+		const document = new Container();
+		for (let index = 0; index < 40; index++) document.addChild(new Text(`line ${index}`, 0, 0));
+		const transcript = new ScrollView(document, { follow: "none", primary: true, scrollbar });
+		const root = new VStack([
+			{ component: transcript, basis: 0, grow: 1, shrink: 1, minSize: 1 },
+			{ component: new Text("dock", 0, 0), basis: "auto" },
+		]);
+		return { transcript, root };
+	};
+
+	const frameWrites = (terminal: RecordingTerminal, eventCount: number): string =>
+		terminal.events
+			.slice(eventCount)
+			.filter((event): event is { type: "write"; data: string } => event.type === "write")
+			.map((event) => event.data)
+			.join("");
+
+	it("scrolls the transcript region instead of rewriting every row it moved", async () => {
+		const terminal = new RecordingTerminal(20, 6);
+		const tui = new TuiAltScreen(terminal, undefined, undefined, { mouse: false });
+		const { transcript, root } = buildViewport();
+		tui.setLayoutRoot(root);
+		tui.start();
+		await terminal.waitForRender();
+		transcript.scrollTo(20);
+		await terminal.waitForRender();
+
+		const eventCount = terminal.events.length;
+		transcript.scrollBy(1);
+		await terminal.waitForRender();
+		const output = frameWrites(terminal, eventCount);
+
+		assert.ok(output.includes("\x1b[1;5r\x1b[1;1H\x1b[1S\x1b[r"), "the transcript region scrolls in the terminal");
+		assert.ok(output.length < 200, `a one-line scroll writes the exposed row only, wrote ${output.length} bytes`);
+		assert.deepStrictEqual(
+			terminal.getViewport().map((line) => line.trimEnd()),
+			["line 21", "line 22", "line 23", "line 24", "line 25", "dock"],
+		);
+		tui.stop();
+	});
+
+	it("scrolls a region below a fixed row", async () => {
+		const terminal = new RecordingTerminal(20, 7);
+		const tui = new TuiAltScreen(terminal, undefined, undefined, { mouse: false });
+		const { transcript } = buildViewport();
+		tui.setLayoutRoot(
+			new VStack([
+				{ component: new Text("header", 0, 0), basis: "auto" },
+				{ component: transcript, basis: 0, grow: 1, shrink: 1, minSize: 1 },
+			]),
+		);
+		tui.start();
+		await terminal.waitForRender();
+		transcript.scrollTo(20);
+		await terminal.waitForRender();
+
+		const eventCount = terminal.events.length;
+		transcript.scrollBy(1);
+		await terminal.waitForRender();
+		const output = frameWrites(terminal, eventCount);
+
+		assert.ok(output.includes("\x1b[2;7r\x1b[2;1H\x1b[1S\x1b[r"), "the region starts below the header row");
+		assert.deepStrictEqual(
+			terminal.getViewport().map((line) => line.trimEnd()),
+			["header", "line 21", "line 22", "line 23", "line 24", "line 25", "line 26"],
+		);
+		tui.stop();
+	});
+
+	it("scrolls the region back when the viewport moves up", async () => {
+		const terminal = new RecordingTerminal(20, 6);
+		const tui = new TuiAltScreen(terminal, undefined, undefined, { mouse: false });
+		const { transcript, root } = buildViewport();
+		tui.setLayoutRoot(root);
+		tui.start();
+		await terminal.waitForRender();
+		transcript.scrollTo(20);
+		await terminal.waitForRender();
+
+		const eventCount = terminal.events.length;
+		transcript.scrollBy(-2);
+		await terminal.waitForRender();
+		const output = frameWrites(terminal, eventCount);
+
+		assert.ok(output.includes("\x1b[1;5r\x1b[1;1H\x1b[2T\x1b[r"), "the region scrolls towards the top");
+		assert.deepStrictEqual(
+			terminal.getViewport().map((line) => line.trimEnd()),
+			["line 18", "line 19", "line 20", "line 21", "line 22", "dock"],
+		);
+		tui.stop();
+	});
+
+	it("paints the same screen as a full repaint when the scrollbar moves", async () => {
+		const terminal = new RecordingTerminal(20, 6);
+		const tui = new TuiAltScreen(terminal, undefined, undefined, { mouse: false });
+		const { transcript, root } = buildViewport("always");
+		tui.setLayoutRoot(root);
+		tui.start();
+		await terminal.waitForRender();
+		transcript.scrollTo(20);
+		await terminal.waitForRender();
+
+		transcript.scrollBy(3);
+		await terminal.waitForRender();
+		const incremental = terminal.getViewport();
+
+		tui.renderNow(true);
+		await terminal.flush();
+		assert.deepStrictEqual(
+			terminal.getViewport(),
+			incremental,
+			"the scrolled rows and the thumb match a full repaint",
+		);
+		tui.stop();
+	});
+
+	it("rewrites the rows when the content only moved the scroll position", async () => {
+		const terminal = new RecordingTerminal(20, 6);
+		const tui = new TuiAltScreen(terminal, undefined, undefined, { mouse: false });
+		const document = new Container();
+		for (let index = 0; index < 40; index++) document.addChild(new Text(`line ${index}`, 0, 0));
+		const transcript = new ScrollView(document, { follow: "end", primary: true });
+		tui.setLayoutRoot(
+			new VStack([
+				{ component: transcript, basis: 0, grow: 1, shrink: 1, minSize: 1 },
+				{ component: new Text("dock", 0, 0), basis: "auto" },
+			]),
+		);
+		tui.start();
+		await terminal.waitForRender();
+
+		const eventCount = terminal.events.length;
+		// Following the end, content that grows above the viewport moves the scroll position without
+		// moving a row, so a scroll command would only be paid for and undone by row writes.
+		document.children.unshift({ render: () => ["extra"], invalidate() {} });
+		tui.invalidate();
+		tui.requestRender();
+		await terminal.waitForRender();
+		const output = frameWrites(terminal, eventCount);
+
+		assert.ok(!/\x1b\[\d+;\d+r/.test(output), "no region scroll for content that only moved the scroll position");
+		assert.deepStrictEqual(
+			terminal.getViewport().map((line) => line.trimEnd()),
+			["line 35", "line 36", "line 37", "line 38", "line 39", "dock"],
+		);
 		tui.stop();
 	});
 });
