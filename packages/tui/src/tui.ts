@@ -714,6 +714,33 @@ function hideImagesUnderOverlay(lines: string[], overlay: OverlayBounds, viewpor
 	}
 }
 
+/** One overlay row's last composite. The inputs decide whether its line still applies. */
+type OverlayRowComposite = { base: string; overlay: string; line: string };
+
+/**
+ * Composites of one overlay's rows, keyed by the overlay component. Compositing segments the whole
+ * base line, which costs more than everything else a dialog frame does, and a dialog that moves its
+ * selection or streams under a fixed row keeps most rows identical from frame to frame.
+ */
+const overlayRowComposites = new WeakMap<
+	Component,
+	{ col: number; width: number; totalWidth: number; rows: (OverlayRowComposite | undefined)[] }
+>();
+
+/** Rows of an overlay's last composite, dropped when its geometry changed. */
+function overlayRowsFor(
+	component: Component,
+	col: number,
+	width: number,
+	totalWidth: number,
+): (OverlayRowComposite | undefined)[] {
+	const cached = overlayRowComposites.get(component);
+	if (cached && cached.col === col && cached.width === width && cached.totalWidth === totalWidth) return cached.rows;
+	const rows: (OverlayRowComposite | undefined)[] = [];
+	overlayRowComposites.set(component, { col, width, totalWidth, rows });
+	return rows;
+}
+
 export type TuiMode = "regular" | "fullscreen";
 
 export interface TuiStopOptions {
@@ -1768,17 +1795,27 @@ export abstract class TuiBase extends Container implements TUI {
 		const viewportStart = Math.max(0, workingHeight - termHeight);
 
 		// Composite each overlay, back to front. Hiding images per overlay also hides images drawn by overlays below it.
-		for (const { overlayLines, row, col, w } of rendered) {
+		for (const { entry, overlayLines, row, col, w } of rendered) {
 			hideImagesUnderOverlay(result, { row, col, width: w, height: overlayLines.length }, viewportStart);
+			const composites = overlayRowsFor(entry.component, col, w, termWidth);
+			composites.length = overlayLines.length;
 			for (let i = 0; i < overlayLines.length; i++) {
 				const idx = viewportStart + row + i;
-				if (idx >= 0 && idx < result.length) {
-					// Defensive: truncate overlay line to declared width before compositing
-					// (components should already respect width, but this ensures it)
-					const truncatedOverlayLine =
-						visibleWidth(overlayLines[i]) > w ? sliceByColumn(overlayLines[i], 0, w, true) : overlayLines[i];
-					result[idx] = this.compositeLineAt(result[idx], truncatedOverlayLine, col, w, termWidth);
+				if (idx < 0 || idx >= result.length) continue;
+				// Defensive: truncate overlay line to declared width before compositing
+				// (components should already respect width, but this ensures it)
+				const overlayLine = overlayLines[i]!;
+				const truncatedOverlayLine =
+					visibleWidth(overlayLine) > w ? sliceByColumn(overlayLine, 0, w, true) : overlayLine;
+				const baseLine = result[idx]!;
+				const previous = composites[i];
+				if (previous?.base === baseLine && previous.overlay === truncatedOverlayLine) {
+					result[idx] = previous.line;
+					continue;
 				}
+				const line = this.compositeLineAt(baseLine, truncatedOverlayLine, col, w, termWidth);
+				composites[i] = { base: baseLine, overlay: truncatedOverlayLine, line };
+				result[idx] = line;
 			}
 		}
 

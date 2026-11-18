@@ -74,6 +74,20 @@ class NullTerminal implements Terminal {
 	setProgramStatus(): void {}
 }
 
+/** A dialog-shaped overlay: 20 rows, one of them marked as the selection. */
+class Dialog implements Component {
+	selected = 0;
+	private readonly rows = Array.from({ length: 20 }, (_, row) => `| Option ${row} ${"-".repeat(40)} |`);
+
+	render(width: number): readonly string[] {
+		return this.rows.map((row, index) =>
+			(index === this.selected ? `>${row.slice(1)}` : row).slice(0, width).padEnd(width, " "),
+		);
+	}
+
+	invalidate(): void {}
+}
+
 const userMarkdown = [
 	"## User request",
 	"",
@@ -181,6 +195,13 @@ function createWorld(nesting: number) {
 	measure("streaming", 100, (frame) => {
 		streamingMarkdown.setText(`${assistantMarkdown}\n\nstream ${"x".repeat(frame + 1)}`);
 	});
+	const dialog = new Dialog();
+	const overlay = tui.showOverlay(dialog, { width: 60, maxHeight: 20, anchor: "center", nonCapturing: true });
+	measure("overlay", 200, (frame) => {
+		dialog.selected = (frame % 20) + 1;
+		streamingMarkdown.setText(`${assistantMarkdown}\n\nstream ${"x".repeat((frame % 40) + 1)}`);
+	});
+	overlay.hide();
 	measure("resize", 10, (frame) => {
 		terminal.columns = frame % 2 === 0 ? COLUMNS - 1 : COLUMNS;
 	});

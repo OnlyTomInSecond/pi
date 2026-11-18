@@ -553,6 +553,55 @@ describe("TUI overlay options", () => {
 		});
 	});
 
+	describe("compositing across frames", () => {
+		class MutableLines implements Component {
+			lines: string[];
+			constructor(lines: string[]) {
+				this.lines = lines;
+			}
+			render(): string[] {
+				return this.lines;
+			}
+			invalidate(): void {}
+		}
+
+		it("recomposites a row only when its base or the overlay changed", async () => {
+			const terminal = new VirtualTerminal(40, 6);
+			const tui: TUI = new TuiMainScreen(terminal);
+			const base = new MutableLines(["base one", "base two"]);
+			const overlay = new MutableLines(["X"]);
+			tui.addChild(base);
+			tui.showOverlay(overlay, { width: 1, row: 0, col: 5, nonCapturing: true });
+			tui.start();
+
+			await renderAndFlush(tui, terminal);
+			assert.strictEqual(terminal.getViewport()[0]?.trimEnd(), "base Xne");
+
+			// The composited row keeps its place while only another row of the base changes.
+			base.lines = ["base one", "new row"];
+			await renderAndFlush(tui, terminal);
+			assert.deepStrictEqual(
+				terminal
+					.getViewport()
+					.slice(0, 2)
+					.map((line) => line.trimEnd()),
+				["base Xne", "new row"],
+			);
+
+			// A changed overlay row is composited again.
+			overlay.lines = ["Y"];
+			await renderAndFlush(tui, terminal);
+			assert.strictEqual(terminal.getViewport()[0]?.trimEnd(), "base Yne");
+
+			// A changed base row under the overlay is composited again.
+			base.lines = ["over one", "new row"];
+			await renderAndFlush(tui, terminal);
+			assert.strictEqual(terminal.getViewport()[0]?.trimEnd(), "over Yne");
+
+			tui.stop();
+		});
+	});
+
 	// https://github.com/earendil-works/pi/issues/10026
 	describe("hiding after stop", () => {
 		it("hideOverlay() leaves the cursor visible", () => {
