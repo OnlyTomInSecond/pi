@@ -1,7 +1,10 @@
 import assert from "node:assert";
 import { describe, it } from "node:test";
+import { Markdown } from "../src/components/markdown.ts";
 import type { Component } from "../src/tui.ts";
 import { TuiMainScreen } from "../src/tui-main-screen.ts";
+import { visibleWidth } from "../src/utils.ts";
+import { defaultMarkdownTheme } from "./test-themes.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
 class LinesComponent implements Component {
@@ -114,5 +117,44 @@ describe("TuiMainScreen scroll preservation", () => {
 		assert.strictEqual(tui.fullRedraws, redraws, "the scrollback is kept");
 		const viewport = terminal.getViewport().map((line) => line.trimEnd());
 		assert.deepStrictEqual(viewport.slice(-3), ["l2", "editor", "footer"], "end of the transcript stays visible");
+	});
+
+	// A streamed table's column widths follow the rows received so far. Rows that already scrolled into
+	// the scrollback cannot be rewritten, so the table stays undrawn until final and is laid out once.
+	it("writes a streamed table once, aligned, after the stream ends", async () => {
+		const terminal = new VirtualTerminal(60, 12);
+		const tui = new TuiMainScreen(terminal);
+		let streaming = true;
+		const markdown = new Markdown("intro\n\n| a | b |\n| --- | --- |\n", 0, 0, defaultMarkdownTheme, undefined, {
+			incremental: () => streaming,
+		});
+		tui.addChild(markdown);
+		tui.renderNow();
+
+		let source = "intro\n\n| a | b |\n| --- | --- |\n";
+		for (let row = 0; row < 30; row++) {
+			source += `| r${row} | ${"cell ".repeat(row % 4)}value |\n`;
+			markdown.setText(source);
+			tui.renderNow();
+		}
+		assert.ok(
+			!(await terminal.flushAndGetViewport()).some((line) => line.includes("│")),
+			"a growing table is not drawn yet",
+		);
+
+		// The stream ends without another setText(): the table becomes final and is written once.
+		streaming = false;
+		tui.renderNow();
+		await terminal.flush();
+
+		const table = terminal.getScrollBuffer().filter((line) => /[│┌├└]/.test(line));
+		assert.strictEqual(table.filter((line) => line.includes("┌")).length, 1, "one table top border");
+		const widths = new Set(table.map((line) => visibleWidth(line.trimEnd())));
+		assert.deepStrictEqual([...widths], [visibleWidth(table[0]!.trimEnd())], "every row keeps the final widths");
+		assert.ok(table.length > 12, "the table is taller than the viewport and still written whole");
+		assert.ok(
+			!terminal.getScrollBuffer().some((line) => /\| r\d+ \|/.test(line)),
+			"no provisional source rows stay in the scrollback",
+		);
 	});
 });

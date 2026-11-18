@@ -150,7 +150,7 @@ describe("Markdown component", () => {
 				"text with **bold** and `code`\n    indented code\n- list item",
 				"> quoted line\nplain continuation\n  indented\n--",
 				"- [x] done\n- [ ] todo\n  - nested\n\n- loose item",
-				"| a | b |\n| - | - |\n| 1 | 2 |\n\nafter",
+				// A growing table is the one deliberate difference: it stays undrawn until final (next test).
 				"see [ref]\n\n[ref]: https://example.com\n\nmore",
 				"<div>block</div>\n\ninline <b>tag</b>\n\nafter",
 				// A comment block is dropped from the tokens, so the frozen prefix must still cover the source.
@@ -223,6 +223,36 @@ describe("Markdown component", () => {
 			assert.strictEqual(highlightCalls, 1);
 
 			assert.deepStrictEqual(markdown.render(80), new Markdown(`${grown} and more`, 0, 0, theme).render(80));
+		});
+		it("lays a streamed table out once, after its block is complete", () => {
+			const header = "intro\n\n| a | b |\n| --- | --- |\n";
+			let streaming = true;
+			const markdown = new Markdown(header, 0, 0, defaultMarkdownTheme, undefined, { incremental: () => streaming });
+
+			// A streamed table's columns follow the rows received so far, so it stays undrawn until final.
+			markdown.render(80);
+			markdown.setText(`${header}| one | two |\n`);
+			assert.ok(!markdown.render(80).some((line) => line.includes("┌")), "a growing table should not be drawn");
+
+			// A following block makes the table final.
+			markdown.setText(`${header}| one | two |\n\nafter the table`);
+			const table = markdown.render(80);
+			assert.ok(
+				table.some((line) => line.includes("│ one │ two │")),
+				"the final table should be drawn",
+			);
+
+			// The end of the stream makes a trailing table final, without another setText().
+			streaming = false;
+			assert.deepStrictEqual(
+				markdown.render(80),
+				new Markdown(`${header}| one | two |\n\nafter the table`, 0, 0, defaultMarkdownTheme).render(80),
+			);
+			markdown.setText(`${header}| one | two |\n`);
+			assert.ok(
+				markdown.render(80).some((line) => line.includes("┌")),
+				"a finished stream should draw its table",
+			);
 		});
 	});
 

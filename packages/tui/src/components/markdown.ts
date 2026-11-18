@@ -376,6 +376,9 @@ export class Markdown implements Component {
 	private cachedText?: string;
 	private cachedWidth?: number;
 	private cachedLines?: string[];
+	// Whether the last render saw a streamed source: a streamed table is drawn only once it is final, so
+	// the flag decides the output and belongs in the cache key.
+	private cachedStreaming?: boolean;
 	// Parsed tokens depend only on the source, so they survive theme and width invalidation. Held weakly: a token tree is
 	// about ten times the size of its source, and every message of a long transcript keeps a Markdown component. The
 	// tokens survive a burst of re-renders, such as a theme preview, and are collected afterwards.
@@ -547,8 +550,14 @@ export class Markdown implements Component {
 	}
 
 	render(width: number): readonly string[] {
+		const streaming = this.isIncremental();
 		// Check cache
-		if (this.cachedLines && this.cachedText === this.text && this.cachedWidth === width) {
+		if (
+			this.cachedLines &&
+			this.cachedText === this.text &&
+			this.cachedWidth === width &&
+			this.cachedStreaming === streaming
+		) {
 			return this.cachedLines;
 		}
 
@@ -562,6 +571,7 @@ export class Markdown implements Component {
 			// Update cache
 			this.cachedText = this.text;
 			this.cachedWidth = width;
+			this.cachedStreaming = streaming;
 			this.cachedLines = result;
 			return result;
 		}
@@ -576,7 +586,7 @@ export class Markdown implements Component {
 		// final lines of blocks whose source is unchanged so only the growing tail is re-rendered.
 		// Blocks parsed before a reference definition resolve their links through it, which their own
 		// source does not show, so nothing is reusable once the source defines links.
-		const incremental = this.isIncremental() && !this.hasLinkDefinitions;
+		const incremental = streaming && !this.hasLinkDefinitions;
 		if (!incremental) {
 			this.cachedTokenLines = undefined;
 		}
@@ -592,6 +602,10 @@ export class Markdown implements Component {
 			const token = tokens[i];
 			const nextTokenType = tokens[i + 1]?.type;
 			const text = tokenText(token);
+			// A streamed table's columns follow the rows received so far, and regular mode cannot rewrite
+			// rows already in the scrollback: leave it undrawn until a following block or the end of the
+			// stream makes it final, then lay it out once.
+			const growingTable = streaming && token.type === "table" && i === tokens.length - 1;
 			const previous = reusableTokens?.[i];
 			if (
 				nextTokenLines &&
@@ -608,7 +622,7 @@ export class Markdown implements Component {
 			}
 
 			const tokenLines: string[] = [];
-			for (const line of this.renderToken(token, contentWidth, nextTokenType)) {
+			for (const line of growingTable ? [] : this.renderToken(token, contentWidth, nextTokenType)) {
 				// Image lines skip wrapping, so split them here: hard breaks after an image must stay separate rows.
 				for (const part of isImageLine(line) ? line.split("\n") : [line]) {
 					if (isImageLine(part)) {
@@ -652,6 +666,7 @@ export class Markdown implements Component {
 		// Update cache
 		this.cachedText = this.text;
 		this.cachedWidth = width;
+		this.cachedStreaming = streaming;
 		this.cachedLines = result;
 
 		return result.length > 0 ? result : [""];
