@@ -74,7 +74,11 @@ function intersect(a: LayoutRect, b: LayoutRect): LayoutRect {
 	return { x, y, width: Math.max(0, right - x), height: Math.max(0, bottom - y) };
 }
 
-function renderCached(context: LayoutContext, component: Component, width: number, indexable: boolean): RenderedRows {
+/**
+ * Output of a component at one width. A container answers with a row index, so a nested tree is
+ * addressed row by row instead of being flattened into a line array.
+ */
+function renderCached(context: LayoutContext, component: Component, width: number): RenderedRows {
 	const safeWidth = Math.max(1, Math.floor(width));
 	let widths = context.renderCache.get(component);
 	if (!widths) {
@@ -83,7 +87,7 @@ function renderCached(context: LayoutContext, component: Component, width: numbe
 	}
 	let rows = widths.get(safeWidth) ?? context.reusableOutput?.get(component)?.get(safeWidth);
 	if (rows === undefined) {
-		rows = (indexable ? component.renderRows?.(safeWidth) : undefined) ?? component.render(safeWidth);
+		rows = component.renderRows?.(safeWidth) ?? component.render(safeWidth);
 	}
 	widths.set(safeWidth, rows);
 	return rows;
@@ -91,11 +95,11 @@ function renderCached(context: LayoutContext, component: Component, width: numbe
 
 /** Height of a component, from its rows alone: a tree that is not flattened is never flattened here. */
 function measureHeight(context: LayoutContext, component: Component, width: number): number {
-	return rowsHeight(renderCached(context, component, width, true));
+	return rowsHeight(renderCached(context, component, width));
 }
 
 function measureWidth(context: LayoutContext, component: Component, width: number): number {
-	const rows = renderCached(context, component, width, false);
+	const rows = renderCached(context, component, width);
 	let max = 0;
 	for (let row = 0; row < rowsHeight(rows); row++) max = Math.max(max, visibleWidth(rowAt(rows, row) ?? ""));
 	return max;
@@ -136,9 +140,9 @@ function layoutComponent(
 	const safeWidth = Math.max(1, Math.floor(width));
 	const node = getLayoutNode(component);
 	if (!node) {
-		// A clipped box can hide the cursor row and needs its lines; an unclipped one is painted from rows,
-		// so a large tree behind it is never flattened.
-		const rows = renderCached(context, component, safeWidth, height === undefined);
+		// A clipped box may shorten the rows it paints; both cases paint from rows, so a large tree behind
+		// the box is never flattened.
+		const rows = renderCached(context, component, safeWidth);
 		const naturalHeight = rowsHeight(rows);
 		const allocatedHeight = height === undefined ? naturalHeight : Math.max(0, Math.floor(height));
 		let lineOffset = 0;
@@ -183,7 +187,7 @@ function layoutComponent(
 			clip: childClip,
 			children: [childBox],
 			scrollView,
-			scrollContent: renderCached(context, node.component, contentWidth, true),
+			scrollContent: renderCached(context, node.component, contentWidth),
 			layer: 0,
 		};
 		childBox.parent = box;

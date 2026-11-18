@@ -406,50 +406,76 @@ type OverlayFocusRestoreState = { status: "inactive" } | ActiveOverlayFocusResto
 type OverlayFocusRestorePolicy = "clear" | "preserve";
 
 /** Rendered children of one container at one width. */
-interface ChildLayout {
+interface ChildLayout<T extends RenderedRows> {
 	readonly width: number;
 	/** The children of this frame; a replacement is detected even when it renders the same lines. */
 	readonly children: readonly Component[];
-	/** Lines of each child in this render; a child that returned the same array again is unchanged. */
-	readonly parts: readonly (readonly string[])[];
+	/** Output of each child in this render; a child that returned the same array or index again is unchanged. */
+	readonly parts: readonly T[];
 	/** Rendered height of each child, in child order. */
 	readonly heights: readonly number[];
 }
 
 /** Concatenated child output of a container, kept across frames. */
-export interface ChildLines extends ChildLayout {
+export interface ChildLines extends ChildLayout<readonly string[]> {
 	readonly lines: string[];
 }
 
+/** How the children of one container are rendered: as flat lines, or as rows a tree can address. */
+type RenderChild<T extends RenderedRows> = (child: Component, width: number) => T;
+
+/**
+ * Render children to flat lines. {@link Component.render} of a container flattens its whole subtree, so
+ * only a frame that needs the concatenated lines asks for them.
+ */
+const renderLinesOfChild: RenderChild<readonly string[]> = (child, width) => child.render(width);
+
+/** Render children to rows, which a nested container answers without flattening its subtree. */
+const renderRowsOfChild: RenderChild<RenderedRows> = (child, width) => child.renderRows?.(width) ?? child.render(width);
+
 /**
  * Render the children of one frame. Returns `undefined` when every child kept its place and returned
- * its last array, so the caller's previous layout still applies. Unchanged subtrees then keep array
- * identity, so every ancestor container skips its copy too.
+ * its last output, so the caller's previous layout still applies. Unchanged subtrees then keep array
+ * identity, so every ancestor container skips its copy too, and the frame allocates nothing for them.
  */
-function layoutChildren(
+function layoutChildren<T extends RenderedRows>(
 	children: readonly Component[],
 	width: number,
-	previous: ChildLayout | undefined,
-): (ChildLayout & { firstChanged: number; unchangedLines: number }) | undefined {
+	previous: ChildLayout<T> | undefined,
+	renderChild: RenderChild<T>,
+): (ChildLayout<T> & { firstChanged: number; unchangedLines: number }) | undefined {
 	const reusable = previous !== undefined && previous.width === width && previous.children.length === children.length;
-	const parts: (readonly string[])[] = reusable ? previous.parts.slice() : new Array(children.length);
-	const heights: number[] = reusable ? previous.heights.slice() : new Array(children.length);
-	// Index of the first child whose position or lines changed, or -1 while every child is unchanged.
+	// Only the children from the first changed one on are collected. A frame whose children are unchanged
+	// returns before it builds any array, which is the common case for a long transcript.
+	const changedParts: T[] = [];
+	const changedHeights: number[] = [];
+	// Index of the first child whose position or output changed, or -1 while every child is unchanged.
 	let firstChanged = reusable ? -1 : 0;
 	let unchangedLines = 0;
 	for (let index = 0; index < children.length; index++) {
-		const lines = children[index]!.render(width);
-		// A child replaced in place (some components assign `children[i]`) keeps its array when it renders
-		// the same lines, so the identity of the child itself decides as well.
-		if (firstChanged === -1 && (previous!.children[index] !== children[index] || previous!.parts[index] !== lines)) {
+		const child = children[index]!;
+		const part = renderChild(child, width);
+		if (firstChanged === -1) {
+			// A child replaced in place (some components assign `children[i]`) keeps its output when it
+			// renders the same rows, so the identity of the child itself decides as well.
+			if (previous!.children[index] === child && previous!.parts[index] === part) {
+				unchangedLines += previous!.heights[index]!;
+				continue;
+			}
 			firstChanged = index;
 		}
-		parts[index] = lines;
-		heights[index] = lines.length;
-		if (firstChanged === -1) unchangedLines += lines.length;
+		changedParts.push(part);
+		changedHeights.push(rowsHeight(part));
 	}
 	if (firstChanged === -1) return undefined;
-	return { width, children: [...children], parts, heights, firstChanged, unchangedLines };
+	return {
+		width,
+		children: [...children],
+		parts: firstChanged === 0 ? changedParts : previous!.parts.slice(0, firstChanged).concat(changedParts),
+		heights: firstChanged === 0 ? changedHeights : previous!.heights.slice(0, firstChanged).concat(changedHeights),
+		firstChanged,
+		unchangedLines,
+	};
 }
 
 /**
@@ -465,7 +491,7 @@ export function renderChildLines(
 	width: number,
 	previous: ChildLines | undefined,
 ): ChildLines {
-	const layout = layoutChildren(children, width, previous);
+	const layout = layoutChildren(children, width, previous, renderLinesOfChild);
 	if (!layout) return previous!;
 	const lines = layout.firstChanged === 0 ? [] : previous!.lines.slice(0, layout.unchangedLines);
 	for (let index = layout.firstChanged; index < layout.parts.length; index++) {
@@ -475,19 +501,19 @@ export function renderChildLines(
 }
 
 /**
- * Child lines addressed by content row. Prefix sums of the child heights map a row to its child, so
- * painting a viewport reads only the rows it paints.
+ * Child output addressed by content row. Prefix sums of the child heights map a row to its child, so
+ * painting a viewport reads only the rows it paints, and a nested container keeps its own index.
  */
-class ChildRowIndex implements RowIndex, ChildLayout {
+class ChildRowIndex implements RowIndex, ChildLayout<RenderedRows> {
 	readonly width: number;
 	readonly children: readonly Component[];
-	readonly parts: readonly (readonly string[])[];
+	readonly parts: readonly RenderedRows[];
 	readonly heights: readonly number[];
 	readonly height: number;
 	/** First content row of each child, in child order. */
 	private readonly starts: readonly number[];
 
-	constructor(layout: ChildLayout) {
+	constructor(layout: ChildLayout<RenderedRows>) {
 		this.width = layout.width;
 		this.children = layout.children;
 		this.parts = layout.parts;
@@ -511,7 +537,7 @@ class ChildRowIndex implements RowIndex, ChildLayout {
 			if (this.starts[middle]! <= row) low = middle;
 			else high = middle - 1;
 		}
-		return this.parts[low]![row - this.starts[low]!];
+		return rowAt(this.parts[low]!, row - this.starts[low]!);
 	}
 }
 
@@ -607,14 +633,17 @@ export class Container implements Component {
 	}
 
 	/**
-	 * Rows of the children without their flattened array, for renderers that paint only a viewport.
+	 * Rows of the children without their flattened array, for renderers that paint only a viewport. A
+	 * nested container answers with its own row index, so a deep tree is never flattened for a frame
+	 * that paints only its viewport.
+	 *
 	 * Kept apart from `render()`: a frame that asks for one does not re-render the other.
 	 */
 	renderRows(width: number): RenderedRows {
 		// A subclass with its own render() output cannot be addressed by its children, so it answers with
 		// that output.
 		if (this.render !== Container.prototype.render) return this.render(width);
-		const next = layoutChildren(this.children, width, this.childRows);
+		const next = layoutChildren(this.children, width, this.childRows, renderRowsOfChild);
 		// `layoutChildren` returns nothing only for a previous layout of the same children and width.
 		if (next) this.childRows = new ChildRowIndex(next);
 		return this.childRows!;

@@ -66,6 +66,30 @@ describe("Container render reuse", () => {
 		assert.strictEqual(rowAt(changed, 3), "d");
 	});
 
+	it("addresses a nested container by row instead of flattening it", () => {
+		const inner = new Container();
+		inner.addChild(new Lines(["a", "b"]));
+		inner.addChild(new Lines(["c"]));
+		const outer = new Container();
+		outer.addChild(inner);
+		outer.addChild(new Lines(["d"]));
+
+		const rows = outer.renderRows(20);
+		assert.deepStrictEqual(
+			[0, 1, 2, 3, 4].map((row) => rowAt(rows, row)),
+			["a", "b", "c", "d", undefined],
+		);
+		// `childHeights()` only exists after `render()`, so a nested container reached this way kept its own
+		// row index instead of assembling and copying its lines.
+		assert.strictEqual(
+			inner.childHeights(20),
+			undefined,
+			"a row-addressed frame does not flatten the nested container",
+		);
+		assert.strictEqual(outer.renderRows(20), rows, "unchanged children keep the index");
+		assert.deepStrictEqual(outer.render(20), ["a", "b", "c", "d"], "the flat frame still renders");
+	});
+
 	it("answers with its own output when a subclass renders it", () => {
 		class Overridden extends Container {
 			override render(): readonly string[] {
