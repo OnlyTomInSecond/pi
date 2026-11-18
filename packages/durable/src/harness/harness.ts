@@ -20,6 +20,7 @@ import { ResetEntry } from "../entries.ts";
 import type { ExecutionEnv } from "../env/index.ts";
 import { contained, SessionImpl } from "../session/session.ts";
 import type { Transaction } from "../session/transaction.ts";
+import type { SignalResult, SignalToken } from "../signals.ts";
 import { hostTimers } from "../timers.ts";
 import type {
 	CommitOptions,
@@ -45,7 +46,7 @@ import { ROOT_CONVERSATION_ID } from "../types.ts";
 import { AgentDoc, configure, createAgent, resolveAgent, resolveSettings } from "./agent.ts";
 import { createCompaction } from "./compaction.ts";
 import { readContext } from "./context.ts";
-import { InboxDoc, withdrawQueuedInputs } from "./inbox.ts";
+import { InboxDoc, withdrawAbortedInputs } from "./inbox.ts";
 import { LIMITS_RESTARTS, LiveDoc, settleSchedulerOutcome } from "./live.ts";
 import { ProviderDoc } from "./provider.ts";
 import { BUILTIN_TASKS } from "./registry.ts";
@@ -53,6 +54,7 @@ import { type InvocationBinding, TaskScheduler } from "./scheduler.ts";
 import { Submissions } from "./submissions.ts";
 import { type TaskGraph, TaskGraphView, type TaskGraphWatch } from "./task-graph.ts";
 import { DURABLE_TELEMETRY_SCHEMA } from "./telemetry.ts";
+import { gatedCall, keepsChildren } from "./tool.ts";
 import type {
 	Agent,
 	AgentChange,
@@ -251,8 +253,10 @@ class HarnessImpl<Tool extends ToolRegistration> extends SessionImpl implements 
 			writeAtClose: (writes) => this.writeAtClose(writes),
 			report: this.#report,
 			limitsRestarts: (kind) => LIMITS_RESTARTS.has(kind),
+			keepsAbandoned: keepsChildren,
+			gated: gatedCall,
 			settleOutcome: settleSchedulerOutcome,
-			withdrawInputs: withdrawQueuedInputs,
+			withdrawInputs: withdrawAbortedInputs,
 			conversation: async (id, binding, callContext) => {
 				const record = await this.readOnLine((line) => line.conversation(id, callContext));
 				return record === undefined ? undefined : boundConversation(id, binding, this.#submissions, this.#tasks);
@@ -352,6 +356,17 @@ class HarnessImpl<Tool extends ToolRegistration> extends SessionImpl implements 
 
 	abortTask(id: TaskId, context: Context): Promise<"marked" | "terminal"> {
 		return this.#tasks.abort(id, context);
+	}
+
+	async signal<T>(
+		taskId: TaskId,
+		token: SignalToken<T>,
+		key: string,
+		value: T,
+		context: Context,
+	): Promise<SignalResult> {
+		this.#tasks.resume();
+		return this.commitWith((tx) => tx.signal(taskId, token, key, value), context);
 	}
 
 	async waitForTask<R>(id: TaskId<R>, context: Context): Promise<SettledTask<R>> {

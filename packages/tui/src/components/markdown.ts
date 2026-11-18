@@ -546,7 +546,7 @@ export class Markdown implements Component {
 			: undefined;
 	}
 
-	render(width: number): string[] {
+	render(width: number): readonly string[] {
 		// Check cache
 		if (this.cachedLines && this.cachedText === this.text && this.cachedWidth === width) {
 			return this.cachedLines;
@@ -576,7 +576,7 @@ export class Markdown implements Component {
 		// final lines of blocks whose source is unchanged so only the growing tail is re-rendered.
 		// Blocks parsed before a reference definition resolve their links through it, which their own
 		// source does not show, so nothing is reusable once the source defines links.
-		const incremental = this.options.incremental === true && !this.hasLinkDefinitions;
+		const incremental = this.isIncremental() && !this.hasLinkDefinitions;
 		if (!incremental) {
 			this.cachedTokenLines = undefined;
 		}
@@ -609,17 +609,20 @@ export class Markdown implements Component {
 
 			const tokenLines: string[] = [];
 			for (const line of this.renderToken(token, contentWidth, nextTokenType)) {
-				if (isImageLine(line)) {
-					tokenLines.push(line);
-					continue;
-				}
-				for (const wrappedLine of wrapTextWithAnsi(line, contentWidth)) {
-					const lineWithMargins = leftMargin + wrappedLine + rightMargin;
-					if (bgFn) {
-						tokenLines.push(applyBackgroundToLine(lineWithMargins, width, bgFn));
-					} else {
-						const paddingNeeded = Math.max(0, width - visibleWidth(lineWithMargins));
-						tokenLines.push(lineWithMargins + " ".repeat(paddingNeeded));
+				// Image lines skip wrapping, so split them here: hard breaks after an image must stay separate rows.
+				for (const part of isImageLine(line) ? line.split("\n") : [line]) {
+					if (isImageLine(part)) {
+						tokenLines.push(part);
+						continue;
+					}
+					for (const wrappedLine of wrapTextWithAnsi(part, contentWidth)) {
+						const lineWithMargins = leftMargin + wrappedLine + rightMargin;
+						if (bgFn) {
+							tokenLines.push(applyBackgroundToLine(lineWithMargins, width, bgFn));
+						} else {
+							const paddingNeeded = Math.max(0, width - visibleWidth(lineWithMargins));
+							tokenLines.push(lineWithMargins + " ".repeat(paddingNeeded));
+						}
 					}
 				}
 			}

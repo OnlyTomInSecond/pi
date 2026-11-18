@@ -275,7 +275,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.requestRender();
 	}
 
-	override render(width: number): string[] {
+	override render(width: number): readonly string[] {
 		return this.layoutRoot?.render(width) ?? super.render(width);
 	}
 
@@ -458,17 +458,17 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 
 	scrollBy(lines: number): void {
 		this.getPrimaryScrollView().scrollBy(lines);
-		this.requestRender();
+		this.requestViewRender();
 	}
 
 	scrollToTop(): void {
 		this.getPrimaryScrollView().scrollToStart();
-		this.requestRender();
+		this.requestViewRender();
 	}
 
 	scrollToBottom(): void {
 		this.getPrimaryScrollView().scrollToEnd();
-		this.requestRender();
+		this.requestViewRender();
 	}
 
 	private scrollToPrompt(direction: -1 | 1): void {
@@ -480,7 +480,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		for (let row = scrollView.scrollTop + direction; row >= 0 && row < lines.length; row += direction) {
 			if (!OSC133_PROMPT_START.test(lines[row] ?? "")) continue;
 			scrollView.scrollTo(row);
-			this.requestRender();
+			this.requestViewRender();
 			return;
 		}
 	}
@@ -802,7 +802,9 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const primary = this.getPrimaryScrollView();
 		if (remaining !== 0 && !seen.has(primary)) primary.scrollBy(remaining);
 		this.scrollbar.updateHover(event.x, event.y);
-		this.requestRender();
+		// Scrolling moves the viewport only. Reusing the previous component output keeps a wheel
+		// frame O(viewport); re-rendering a long transcript on every wheel event saturated a core.
+		this.requestViewRender();
 	}
 
 	private parseSgrMouseEvent(data: string): SgrMouseEvent | undefined {
@@ -889,9 +891,14 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		const width = Math.max(1, this.terminal.columns);
 		const height = Math.max(1, this.terminal.rows);
 		const root = this.layoutRoot ?? this.implicitScrollView;
-		let nextLayout = renderLayoutFrame(root, width, height, () => this.requestRender());
+		const requestViewRender = () => this.requestViewRender();
+		// A frame whose components did not change (scrolling, selection, hover) reuses the previous
+		// output, so it costs O(viewport) instead of re-rendering the whole transcript.
+		const reusableOutput = this.contentChanged ? undefined : this.currentLayout?.renderCache;
+		this.contentChanged = false;
+		let nextLayout = renderLayoutFrame(root, width, height, requestViewRender, reusableOutput);
 		if (this.search.refresh(nextLayout)) {
-			nextLayout = renderLayoutFrame(root, width, height, () => this.requestRender());
+			nextLayout = renderLayoutFrame(root, width, height, requestViewRender, nextLayout.renderCache);
 		}
 		// Resolve fake cursors before highlighting and compositing, which only track SGR codes
 		let screen = this.resolveFakeCursors(nextLayout.lines.map((line) => line.replace(OSC133_ZONE_PREFIX, "")));
@@ -938,11 +945,13 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		output.append(BEGIN_SYNCHRONIZED_OUTPUT);
 		if (fullRedraw) {
 			this.fullRedrawCount += 1;
-			const clearImages =
-				this.imageProtocol === "kitty" && hadUploadedKittyImages
-					? deleteAllKittyPlacements()
-					: this.deleteKittyImages();
-			output.append(`${clearImages}\x1b[2J`);
+			if (this.imageProtocol === "kitty" && hadUploadedKittyImages) {
+				// Kitty frees image data without placements on ED 2, which would break placement-only reuse.
+				// Every row is cleared with EL 2 below, so keep the uploads and skip the screen clear.
+				output.append(deleteAllKittyPlacements());
+			} else {
+				output.append(`${this.deleteKittyImages()}\x1b[2J`);
+			}
 		} else if (imagesNeedRedraw) {
 			if (this.imageProtocol === "iterm2") output.append("\x1b[2J");
 			else if (this.imageProtocol === "kitty") output.append(deleteAllKittyPlacements());

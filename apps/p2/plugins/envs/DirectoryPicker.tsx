@@ -13,8 +13,12 @@ import {
 import { useEffect, useRef, useState } from "react";
 import { type DirectoryListing, Envs } from "./contract.ts";
 
-export function directoryPickerLayer(env: string | null, path: string) {
-	return { kind: "sheet" as const, name: "cwd", locator: JSON.stringify({ env, path }) };
+/** The picker at the location its view passes (`env`, `value`): the session's, or the new session's. */
+export const DIRECTORY_PICKER = { kind: "sheet", name: "cwd" } as const;
+
+/** The picker at `path` on `env`; `name` is its layer's, for a picker another screen than the chat opens. */
+export function directoryPickerLayer(env: string | null, path: string, name: string = DIRECTORY_PICKER.name) {
+	return { kind: "sheet" as const, name, locator: JSON.stringify({ env, path }) };
 }
 function locationLabel(env: string | null, cwd: string): string {
 	return env ? `${env}:${cwd}` : shortPath(cwd);
@@ -33,8 +37,11 @@ export function DirectoryPicker({
 	moving,
 	value,
 	recent = () => [],
+	sheet: sheetName = DIRECTORY_PICKER.name,
+	title = "Working directory",
 	onChange,
 	onClose,
+	onBack,
 }: {
 	/** The environment browsed: a remote env's name, or null for this device. */
 	env: string | null;
@@ -42,8 +49,13 @@ export function DirectoryPicker({
 	moving?: { env: string | null };
 	value: string;
 	recent?: (env: string | null) => string[];
+	/** The name of its layer (`directoryPickerLayer`'s `name`): the chat's pickers use the default. */
+	sheet?: string;
+	title?: string;
 	onChange: (env: string | null, value: string) => void;
 	onClose: () => void;
+	/** Where the sheet's Back leads (the new-session screen's recent folders); no Back control without it. */
+	onBack?: () => void;
 }) {
 	const service = useObject(Envs, {});
 	const envs = useReadable(service?.envs) ?? [];
@@ -52,7 +64,7 @@ export function DirectoryPicker({
 		void service?.warm(BACKGROUND_CONTEXT).catch(() => {});
 	}, [service]);
 	const nav = useNavigation();
-	const sheet = useSheet("cwd");
+	const sheet = useSheet(sheetName);
 	let directory = value;
 	let env = initialEnv;
 	if (sheet?.locator) {
@@ -80,13 +92,13 @@ export function DirectoryPicker({
 	const browse = (path: string, environment = env) => {
 		const route = nav.route;
 		const top = route.layers.at(-1);
-		if (top?.kind !== "sheet" || top.name !== "cwd") return;
+		if (top?.kind !== "sheet" || top.name !== sheetName) return;
 		listings.prefetch(listingKey(environment, path), request(path, environment));
 		if (path === shown && environment === env) load(path);
 		else
 			void nav.push({
 				...route,
-				layers: [...route.layers.slice(0, -1), directoryPickerLayer(environment, path)],
+				layers: [...route.layers.slice(0, -1), directoryPickerLayer(environment, path, sheetName)],
 			});
 	};
 	/** Only the latest folder's answer is shown: an earlier, slower one must not replace it. */
@@ -140,9 +152,10 @@ export function DirectoryPicker({
 	const leaves = moves && sandboxHost(moving.env) !== undefined;
 	const [leaving, setLeaving] = useState<string>();
 	const target = listing ? listingKey(env, listing.path) : undefined;
+	const use = listing && `${moves ? "Move session to" : "Use"} ${locationLabel(env, listing.path)}`;
 
 	return (
-		<Sheet title="Working directory" onClose={onClose}>
+		<Sheet title={title} onClose={onClose} {...(onBack ? { onBack } : {})}>
 			{/* Path and the choice stay pinned while the folder list scrolls with the sheet. */}
 			<div className="sheet-sticky directory-head">
 				{envs.length > 0 && (
@@ -228,10 +241,11 @@ export function DirectoryPicker({
 						<button
 							type="button"
 							className="button primary block directory-use"
+							title={use}
 							disabled={loading}
 							onClick={() => (leaves ? setLeaving(target) : onChange(env, listing.path))}
 						>
-							{moves ? "Move session to" : "Use"} {locationLabel(env, listing.path)}
+							<span className="directory-path">{use}</span>
 						</button>
 					))}
 				{moves && (
@@ -271,7 +285,7 @@ export function DirectoryPicker({
 					{listing.directories.map((path) => (
 						<button type="button" key={path} className="row-button mono" onClick={() => browse(path)}>
 							<span>
-								<FolderIcon /> {name(path)}
+								<FolderIcon /> <span className="directory-path">{name(path)}</span>
 							</span>
 							<ChevronIcon />
 						</button>
@@ -286,9 +300,15 @@ export function DirectoryPicker({
 					{recent(env)
 						.slice(0, 8)
 						.map((path) => (
-							<button type="button" key={path} className="row-button mono" onClick={() => browse(path)}>
+							<button
+								type="button"
+								key={path}
+								className="row-button mono"
+								title={locationLabel(env, path)}
+								onClick={() => browse(path)}
+							>
 								<span>
-									<FolderIcon /> {locationLabel(env, path)}
+									<FolderIcon /> <span className="directory-path">{locationLabel(env, path)}</span>
 								</span>
 								<ChevronIcon />
 							</button>

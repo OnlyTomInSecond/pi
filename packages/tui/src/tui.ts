@@ -12,7 +12,14 @@ import {
 	type TerminalColorScheme,
 	type TerminalColors,
 } from "./terminal-colors.ts";
-import { getCapabilities, isImageLine, setCellDimensions } from "./terminal-image.ts";
+import {
+	getCapabilities,
+	getImageLineExtent,
+	getMaxKittyImageRows,
+	isImageLine,
+	setCellDimensions,
+	stripImageSequences,
+} from "./terminal-image.ts";
 import { extractSegments, normalizeTerminalOutput, sliceByColumn, sliceWithWidth, visibleWidth } from "./utils.ts";
 
 /**
@@ -118,9 +125,9 @@ export interface Component {
 	/**
 	 * Render the component to lines for the given viewport width
 	 * @param width - Current viewport width
-	 * @returns Array of strings, each representing a line
+	 * @returns Lines to draw. Components may return a cached array: callers must not modify it.
 	 */
-	render(width: number): string[];
+	render(width: number): readonly string[];
 
 	/** Optional handler for keyboard input when component has focus. */
 	handleInput?(data: string): void;
@@ -367,6 +374,73 @@ type ActiveOverlayFocusRestoreState = EligibleOverlayFocusRestoreState | Blocked
 type OverlayFocusRestoreState = { status: "inactive" } | ActiveOverlayFocusRestoreState;
 type OverlayFocusRestorePolicy = "clear" | "preserve";
 
+/** Concatenated child output of a container, kept across frames. */
+export interface ChildLines {
+	readonly width: number;
+	/** The children of this frame; a replacement is detected even when it renders the same lines. */
+	readonly children: readonly Component[];
+	/** Lines of each child in this render; a child that returned the same array again is unchanged. */
+	readonly parts: readonly (readonly string[])[];
+	/** Rendered height of each child, in child order. */
+	readonly heights: readonly number[];
+	readonly lines: string[];
+}
+
+/**
+ * Render children and concatenate their lines.
+ *
+ * Returns `previous` unchanged when every child kept its place and returned its last array. Unchanged
+ * subtrees then keep array identity, so every ancestor container skips its copy too. When a child
+ * changed, only the children from the first changed one on are copied: streaming appends to the last
+ * child, so a long transcript frame copies its growing tail instead of every line.
+ * Callers must treat the returned lines as read-only, like any component's cached render output.
+ */
+export function renderChildLines(
+	children: readonly Component[],
+	width: number,
+	previous: ChildLines | undefined,
+): ChildLines {
+	const reusable = previous !== undefined && previous.width === width && previous.children.length === children.length;
+	const parts: (readonly string[])[] = reusable ? previous.parts.slice() : new Array(children.length);
+	const heights: number[] = reusable ? previous.heights.slice() : new Array(children.length);
+	// Index of the first child whose position or lines changed, or -1 while every child is unchanged.
+	let firstChanged = reusable ? -1 : 0;
+	let unchangedLines = 0;
+	for (let index = 0; index < children.length; index++) {
+		const lines = children[index]!.render(width);
+		// A child replaced in place (some components assign `children[i]`) keeps its array when it renders
+		// the same lines, so the identity of the child itself decides as well.
+		if (firstChanged === -1 && (previous!.children[index] !== children[index] || previous!.parts[index] !== lines)) {
+			firstChanged = index;
+		}
+		parts[index] = lines;
+		heights[index] = lines.length;
+		if (firstChanged === -1) unchangedLines += lines.length;
+	}
+	if (firstChanged === -1) return previous!;
+	const lines = firstChanged === 0 ? [] : previous!.lines.slice(0, unchangedLines);
+	for (let index = firstChanged; index < parts.length; index++) {
+		for (const line of parts[index]!) lines.push(line);
+	}
+	return { width, children: [...children], parts, heights, lines };
+}
+
+/** Dispatch a mouse event to the child of a vertical child layout that covers its row. */
+export function dispatchMouseToChildLines(
+	layout: ChildLines,
+	event: TuiMouseEvent,
+): TuiMouseDispatchResult | undefined {
+	let childY = 0;
+	for (let index = 0; index < layout.children.length; index++) {
+		const childHeight = layout.heights[index]!;
+		if (event.y >= childY && event.y < childY + childHeight) {
+			return dispatchMouseEvent(layout.children[index]!, { ...event, y: event.y - childY, height: childHeight });
+		}
+		childY += childHeight;
+	}
+	return undefined;
+}
+
 /**
  * Container - a component that contains other components
  */
@@ -377,35 +451,35 @@ export class Container implements Component {
 	 * same array again has not changed, so an unchanged tree reuses the frame instead of rebuilding it.
 	 * Commit frames this way render in O(children) instead of copying every transcript line.
 	 */
-	private renderState?: { width: number; childLines: string[][]; heights: number[]; lines: string[] };
+	private childLines?: ChildLines;
 
 	addChild(component: Component): void {
 		this.children.push(component);
-		this.renderState = undefined;
+		this.childLines = undefined;
 	}
 
 	removeChild(component: Component): void {
 		const index = this.children.indexOf(component);
 		if (index !== -1) {
 			this.children.splice(index, 1);
-			this.renderState = undefined;
+			this.childLines = undefined;
 		}
 	}
 
 	clear(): void {
 		this.children = [];
-		this.renderState = undefined;
+		this.childLines = undefined;
 	}
 
 	invalidate(): void {
-		this.renderState = undefined;
+		this.childLines = undefined;
 		for (const child of this.children) {
 			child.invalidate?.();
 		}
 	}
 
 	releaseRenderCache(): void {
-		this.renderState = undefined;
+		this.childLines = undefined;
 		for (const child of this.children) {
 			child.releaseRenderCache?.();
 		}
@@ -416,58 +490,24 @@ export class Container implements Component {
 	 * not current. The main-screen renderer uses it to map committed transcript lines to children.
 	 */
 	childHeights(width: number): number[] | undefined {
-		const state = this.renderState;
-		return state?.width === width ? state.heights : undefined;
+		const layout = this.childLines;
+		return layout?.width === width ? [...layout.heights] : undefined;
 	}
 
 	handleMouse(event: TuiMouseEvent): TuiMouseDispatchResult | undefined {
 		if (event.y < 0 || event.y >= event.height) return undefined;
-		const state = this.renderState?.width === event.width ? this.renderState : undefined;
-		let childY = 0;
-		for (let index = 0; index < this.children.length; index++) {
-			const child = this.children[index]!;
-			const childHeight = state?.heights[index] ?? child.render(event.width).length;
-			if (event.y >= childY && event.y < childY + childHeight) {
-				const result = dispatchMouseEvent(child, {
-					...event,
-					y: event.y - childY,
-					height: childHeight,
-				});
-				if (result?.focus && (this as Component).handleInput) return { ...result, focusTarget: this };
-				return result;
-			}
-			childY += childHeight;
-		}
-		return undefined;
+		const layout =
+			this.childLines?.width === event.width
+				? this.childLines
+				: renderChildLines(this.children, event.width, undefined);
+		const result = dispatchMouseToChildLines(layout, event);
+		if (result?.focus && (this as Component).handleInput) return { ...result, focusTarget: this };
+		return result;
 	}
 
-	render(width: number): string[] {
-		const previous = this.renderState;
-		const sameChildren =
-			previous !== undefined && previous.width === width && previous.childLines.length === this.children.length;
-		const childLines = sameChildren ? previous.childLines : new Array<string[]>(this.children.length);
-		const heights = sameChildren ? previous.heights : new Array<number>(this.children.length);
-		// Index of the first child whose lines changed, or -1 while every child returned its last array.
-		let firstChanged = sameChildren ? -1 : 0;
-		let unchangedLines = 0;
-		for (let index = 0; index < this.children.length; index++) {
-			const lines = this.children[index]!.render(width);
-			if (firstChanged === -1 && previous!.childLines[index] !== lines) firstChanged = index;
-			childLines[index] = lines;
-			heights[index] = lines.length;
-			if (firstChanged === -1) unchangedLines += lines.length;
-		}
-		if (firstChanged === -1) return previous!.lines;
-		// Only the children from the first changed one on have to be copied into the new frame.
-		const lines = sameChildren ? previous!.lines.slice(0, unchangedLines) : [];
-		for (let index = firstChanged; index < childLines.length; index++) {
-			for (const line of childLines[index]!) {
-				lines.push(line);
-			}
-		}
-		if (sameChildren) previous!.lines = lines;
-		else this.renderState = { width, childLines, heights, lines };
-		return lines;
+	render(width: number): readonly string[] {
+		this.childLines = renderChildLines(this.children, width, this.childLines);
+		return this.childLines.lines;
 	}
 }
 
@@ -506,6 +546,33 @@ export function compositeTuiLine(
 		" ".repeat(afterPad);
 
 	return visibleWidth(result) <= totalWidth ? result : sliceByColumn(result, 0, totalWidth, true);
+}
+
+/**
+ * Drop image placements that intersect an overlay rectangle (`row` is viewport-relative).
+ * Terminals draw images above text, so an overlay cannot paint over them. The renderers delete a
+ * placement once its line changes and draw it again when the overlay no longer covers it.
+ * Images beside the overlay stay; on the row holding such an image's sequence the overlay is not
+ * drawn, because `compositeTuiLine` passes image lines through.
+ */
+function hideImagesUnderOverlay(lines: string[], overlay: OverlayBounds, viewportStart: number): void {
+	if (overlay.height === 0) return;
+	// Kitty images extend downward, so an image line above the viewport can still reach into it.
+	for (let index = Math.max(0, viewportStart - getMaxKittyImageRows()); index < lines.length; index++) {
+		const line = lines[index]!;
+		const extent = getImageLineExtent(line);
+		if (!extent) continue;
+		const firstRow = index + extent.firstRow - viewportStart;
+		const lastRow = index + extent.lastRow - viewportStart;
+		if (
+			firstRow < overlay.row + overlay.height &&
+			lastRow >= overlay.row &&
+			extent.startCol < overlay.col + overlay.width &&
+			extent.endCol > overlay.col
+		) {
+			lines[index] = stripImageSequences(line);
+		}
+	}
 }
 
 export type TuiMode = "regular" | "fullscreen";
@@ -598,6 +665,11 @@ export abstract class TuiBase extends Container implements TUI {
 	/** Global callback for debug key (Shift+Ctrl+D). Called before input is forwarded to focused component. */
 	public onDebug?: () => void;
 	private renderRequested = false;
+	/**
+	 * Whether a render request since the last frame may have changed component output. Only
+	 * `requestViewRender()` leaves it false, so a renderer may reuse the previous frame's output.
+	 */
+	protected contentChanged = true;
 	private immediateRenderScheduled = false;
 	private renderTimer: NodeJS.Timeout | undefined;
 	private lastRenderAt = 0;
@@ -715,6 +787,8 @@ export abstract class TuiBase extends Container implements TUI {
 		component: Component | null;
 		overlayFocusRestore: OverlayFocusRestorePolicy;
 	}): void {
+		// Focused components draw a cursor, so a focus change must not reuse earlier output.
+		this.contentChanged = true;
 		const previousFocus = this.focusedComponent;
 		let nextFocus = component;
 		const previousFocusedOverlay = previousFocus
@@ -1104,6 +1178,7 @@ export abstract class TuiBase extends Container implements TUI {
 
 	renderNow(force = false): void {
 		if (force) this.resetRenderState();
+		this.contentChanged = true;
 		this.renderRequested = false;
 		this.cancelRenderTimer();
 		this.lastRenderAt = performance.now();
@@ -1116,12 +1191,19 @@ export abstract class TuiBase extends Container implements TUI {
 			this.requestImmediateRender();
 			return;
 		}
+		this.contentChanged = true;
+		this.requestViewRender();
+	}
+
+	/** Request a frame for a change that leaves component output unchanged, such as a scroll position. */
+	protected requestViewRender(): void {
 		if (this.renderRequested) return;
 		this.renderRequested = true;
 		process.nextTick(() => this.scheduleRender());
 	}
 
 	private requestImmediateRender(): void {
+		this.contentChanged = true;
 		this.cancelRenderTimer();
 		this.renderRequested = true;
 		if (this.immediateRenderScheduled) return;
@@ -1469,7 +1551,13 @@ export abstract class TuiBase extends Container implements TUI {
 		for (const entry of this.overlayStack) entry.bounds = undefined;
 
 		// Pre-render all visible overlays and calculate positions
-		const rendered: { entry: OverlayStackEntry; overlayLines: string[]; row: number; col: number; w: number }[] = [];
+		const rendered: {
+			entry: OverlayStackEntry;
+			overlayLines: readonly string[];
+			row: number;
+			col: number;
+			w: number;
+		}[] = [];
 		let minLinesNeeded = result.length;
 
 		const visibleEntries = this.overlayStack.filter((e) => this.isOverlayVisible(e));
@@ -1482,7 +1570,7 @@ export abstract class TuiBase extends Container implements TUI {
 			const { width, maxHeight } = this.resolveOverlayLayout(options, 0, termWidth, termHeight);
 
 			// Render component at calculated width
-			let overlayLines = this.resolveFakeCursors(component.render(width));
+			let overlayLines: readonly string[] = this.resolveFakeCursors(component.render(width));
 
 			// Apply maxHeight if specified
 			if (maxHeight !== undefined && overlayLines.length > maxHeight) {
@@ -1516,8 +1604,9 @@ export abstract class TuiBase extends Container implements TUI {
 
 		const viewportStart = Math.max(0, workingHeight - termHeight);
 
-		// Composite each overlay
+		// Composite each overlay, back to front. Hiding images per overlay also hides images drawn by overlays below it.
 		for (const { overlayLines, row, col, w } of rendered) {
+			hideImagesUnderOverlay(result, { row, col, width: w, height: overlayLines.length }, viewportStart);
 			for (let i = 0; i < overlayLines.length; i++) {
 				const idx = viewportStart + row + i;
 				if (idx >= 0 && idx < result.length) {
@@ -1590,8 +1679,11 @@ export abstract class TuiBase extends Container implements TUI {
 	 * Resolve fake cursor markers to reverse video. When the hardware cursor is shown, a fake cursor
 	 * directly after CURSOR_MARKER is dropped because the terminal cursor is drawn there. Fake cursors
 	 * of components without focus have no CURSOR_MARKER and stay visible.
+	 *
+	 * Without markers the input array comes back as is, so callers that mutate the result own it: each
+	 * call site passes an array it built for this frame, never a component's cached render output.
 	 */
-	protected resolveFakeCursors(lines: string[]): string[] {
+	protected resolveFakeCursors(lines: readonly string[]): string[] {
 		// Most frames (the committed prefix, and any tail without a focused editor) contain no fake
 		// cursor at all. Find the first line that has one and return the input array untouched otherwise.
 		let firstMarker = -1;
@@ -1601,9 +1693,12 @@ export abstract class TuiBase extends Container implements TUI {
 				break;
 			}
 		}
-		if (firstMarker === -1) return lines;
+		// The cast holds because a component's cached output is copied before it reaches a caller that
+		// writes to the returned array (see the doc comment); returning it avoids copying a frame that
+		// has no fake cursor at all, which is the common case for a long transcript.
+		if (firstMarker === -1) return lines as string[];
 
-		const resolved = lines.slice();
+		const resolved: string[] = lines.slice();
 		for (let i = firstMarker; i < resolved.length; i++) {
 			const line = resolved[i]!;
 			if (!line.includes(FAKE_CURSOR_START)) continue;

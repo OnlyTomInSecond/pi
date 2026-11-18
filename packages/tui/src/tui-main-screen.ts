@@ -21,7 +21,7 @@ const REPLAY_SCREENS = 4;
 const OSC133_ZONE_PREFIX = /^(?:\x1b\]133;[ABC](?:\x07|\x1b\\))+/;
 
 /** Drop OSC 133 prompt markers: the terminal reads 133;A as a new shell prompt, which ends program status (OSC 7501). */
-function stripOsc133(lines: string[]): string[] {
+function stripOsc133(lines: readonly string[]): string[] {
 	return lines.map((line) => line.replace(OSC133_ZONE_PREFIX, ""));
 }
 
