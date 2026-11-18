@@ -446,7 +446,9 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 			output.append("\x1b[?2026h"); // Begin synchronized output
 			if (mode !== "first") {
 				output.append(this.deleteKittyImages(this.previousKittyImageIds));
-				output.append(mode === "window" ? "\x1b[2J\x1b[H" : "\x1b[2J\x1b[H\x1b[3J");
+				// A window repaint erases row by row so the screen is never blank, which a screen clear
+				// followed by a slow redraw looks like over a remote connection.
+				output.append(mode === "window" ? "\x1b[H" : "\x1b[2J\x1b[H\x1b[3J");
 			}
 			for (let i = 0; i < renderLines.length; i++) {
 				if (i > 0) output.append("\r\n");
@@ -455,7 +457,7 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 				const imageReservedRows = isImage ? this.getKittyImageReservedRows(renderLines, i) : 1;
 				if (imageReservedRows > 1 && imageReservedRows <= height) {
 					for (let row = 1; row < imageReservedRows; row++) {
-						output.append("\r\n");
+						output.append(mode === "window" ? "\r\n\x1b[2K" : "\r\n");
 					}
 					output.append(`\x1b[${imageReservedRows - 1}A`);
 					output.append(line);
@@ -463,12 +465,17 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 					i += imageReservedRows - 1;
 					continue;
 				}
+				if (mode === "window") output.append("\x1b[2K");
 				output.append(this.formatOutputLine(line));
+			}
+			if (mode === "window") {
+				// Rows below the content are still on screen; erase them without scrolling (the last
+				// screen row is never followed by a line break).
+				for (let row = renderLines.length; row < height; row++) output.append("\r\n\x1b[2K");
 			}
 			output.append("\x1b[?2026l"); // End synchronized output
 			output.flush();
 			this.cursorRow = Math.max(0, totalLines - 1);
-			this.hardwareCursorRow = this.cursorRow;
 			// A repaint starts from a cleared screen, so it cannot leave stale rows behind.
 			if (mode === "first") {
 				this.maxLinesRendered = Math.max(this.maxLinesRendered, totalLines);
@@ -477,6 +484,12 @@ export class TuiMainScreen extends TuiBase implements CommittedTUI {
 			}
 			const bufferLength = mode === "window" ? totalLines : Math.max(height, totalLines);
 			this.previousViewportTop = Math.max(0, bufferLength - height);
+			// The cursor sits on the last written row. A window repaint that also erased the rows below
+			// it leaves the cursor on the bottom screen row instead.
+			this.hardwareCursorRow =
+				mode === "window" && renderLines.length < height
+					? this.previousViewportTop + height - 1
+					: Math.max(0, totalLines - 1);
 			this.hardwareCursorCol = -1;
 			this.positionHardwareCursor(cursorPos, totalLines);
 			this.recordFrame(head, tail, true);
