@@ -322,6 +322,15 @@ export interface MarkdownOptions {
 	 * once the stream ends.
 	 */
 	incremental?: boolean | (() => boolean);
+	/**
+	 * Wait for a streamed table's block to be complete before drawing it. A table's column widths
+	 * follow the rows received so far, so a table that is still the last block keeps changing. A
+	 * consumer that cannot rewrite a line it already wrote, such as the regular-mode transcript above
+	 * the terminal's scrollback, must defer it, or the rows it already wrote keep their first widths.
+	 * Defaults to drawing the table as it grows, which a fullscreen transcript that repaints its
+	 * viewport can do.
+	 */
+	deferStreamedTable?: boolean | (() => boolean);
 }
 
 interface InlineStyleContext {
@@ -376,9 +385,10 @@ export class Markdown implements Component {
 	private cachedText?: string;
 	private cachedWidth?: number;
 	private cachedLines?: string[];
-	// Whether the last render saw a streamed source: a streamed table is drawn only once it is final, so
-	// the flag decides the output and belongs in the cache key.
+	// Whether the last render saw a streamed source: a streamed code block is not highlighted yet and a
+	// streamed table may wait for its block, so both flags decide the output and belong in the cache key.
 	private cachedStreaming?: boolean;
+	private cachedTableDeferred?: boolean;
 	// Parsed tokens depend only on the source, so they survive theme and width invalidation. Held weakly: a token tree is
 	// about ten times the size of its source, and every message of a long transcript keeps a Markdown component. The
 	// tokens survive a burst of re-renders, such as a theme preview, and are collected afterwards.
@@ -448,6 +458,12 @@ export class Markdown implements Component {
 	private isIncremental(): boolean {
 		const incremental = this.options.incremental;
 		return typeof incremental === "function" ? incremental() : incremental === true;
+	}
+
+	/** Whether a streamed table waits for its block to be complete, because the consumer cannot rewrite rows. */
+	private defersStreamedTable(): boolean {
+		const defer = this.options.deferStreamedTable;
+		return typeof defer === "function" ? defer() : defer === true;
 	}
 
 	/**
@@ -551,12 +567,14 @@ export class Markdown implements Component {
 
 	render(width: number): readonly string[] {
 		const streaming = this.isIncremental();
+		const tableDeferred = streaming && this.defersStreamedTable();
 		// Check cache
 		if (
 			this.cachedLines &&
 			this.cachedText === this.text &&
 			this.cachedWidth === width &&
-			this.cachedStreaming === streaming
+			this.cachedStreaming === streaming &&
+			this.cachedTableDeferred === tableDeferred
 		) {
 			return this.cachedLines;
 		}
@@ -572,6 +590,7 @@ export class Markdown implements Component {
 			this.cachedText = this.text;
 			this.cachedWidth = width;
 			this.cachedStreaming = streaming;
+			this.cachedTableDeferred = tableDeferred;
 			this.cachedLines = result;
 			return result;
 		}
@@ -602,10 +621,10 @@ export class Markdown implements Component {
 			const token = tokens[i];
 			const nextTokenType = tokens[i + 1]?.type;
 			const text = tokenText(token);
-			// A streamed table's columns follow the rows received so far, and regular mode cannot rewrite
-			// rows already in the scrollback: leave it undrawn until a following block or the end of the
-			// stream makes it final, then lay it out once.
-			const growingTable = streaming && token.type === "table" && i === tokens.length - 1;
+			// A table's columns follow the rows received so far, so a growing table keeps changing. A consumer
+			// that cannot rewrite rows already written leaves it undrawn until a following block or the end
+			// of the stream makes it final, then lays it out once.
+			const deferredTable = tableDeferred && token.type === "table" && i === tokens.length - 1;
 			const previous = reusableTokens?.[i];
 			if (
 				nextTokenLines &&
@@ -622,7 +641,7 @@ export class Markdown implements Component {
 			}
 
 			const tokenLines: string[] = [];
-			for (const line of growingTable ? [] : this.renderToken(token, contentWidth, nextTokenType)) {
+			for (const line of deferredTable ? [] : this.renderToken(token, contentWidth, nextTokenType)) {
 				// Image lines skip wrapping, so split them here: hard breaks after an image must stay separate rows.
 				for (const part of isImageLine(line) ? line.split("\n") : [line]) {
 					if (isImageLine(part)) {
@@ -667,6 +686,7 @@ export class Markdown implements Component {
 		this.cachedText = this.text;
 		this.cachedWidth = width;
 		this.cachedStreaming = streaming;
+		this.cachedTableDeferred = tableDeferred;
 		this.cachedLines = result;
 
 		return result.length > 0 ? result : [""];
@@ -1212,17 +1232,24 @@ export class Markdown implements Component {
 
 		const maxUnbrokenWordWidth = 30;
 
+		// Render every cell once: a table that grows is laid out again on each frame, and the natural
+		// widths, the column fit, and the rows below all read the same styled text.
+		const headerTexts = token.header.map((cell) => this.renderInlineTokens(cell.tokens || [], styleContext));
+		const rowTexts = token.rows.map((row) =>
+			row.map((cell) => this.renderInlineTokens(cell.tokens || [], styleContext)),
+		);
+
 		// Calculate natural column widths (what each column needs without constraints)
 		const naturalWidths: number[] = [];
 		const minWordWidths: number[] = [];
 		for (let i = 0; i < numCols; i++) {
-			const headerText = this.renderInlineTokens(token.header[i].tokens || [], styleContext);
+			const headerText = headerTexts[i];
 			naturalWidths[i] = visibleWidth(headerText);
 			minWordWidths[i] = Math.max(1, this.getLongestWordWidth(headerText, maxUnbrokenWordWidth));
 		}
-		for (const row of token.rows) {
-			for (let i = 0; i < row.length; i++) {
-				const cellText = this.renderInlineTokens(row[i].tokens || [], styleContext);
+		for (const cells of rowTexts) {
+			for (let i = 0; i < cells.length; i++) {
+				const cellText = cells[i];
 				naturalWidths[i] = Math.max(naturalWidths[i] || 0, visibleWidth(cellText));
 				minWordWidths[i] = Math.max(
 					minWordWidths[i] || 1,
@@ -1306,10 +1333,9 @@ export class Markdown implements Component {
 		lines.push(`┌─${topBorderCells.join("─┬─")}─┐`);
 
 		// Render header with wrapping
-		const headerCellLines: string[][] = token.header.map((cell, i) => {
-			const text = this.renderInlineTokens(cell.tokens || [], styleContext);
-			return this.wrapCellText(text, columnWidths[i], styleContext?.stylePrefix);
-		});
+		const headerCellLines: string[][] = headerTexts.map((text, i) =>
+			this.wrapCellText(text, columnWidths[i], styleContext?.stylePrefix),
+		);
 		const headerLineCount = Math.max(...headerCellLines.map((c) => c.length));
 
 		for (let lineIdx = 0; lineIdx < headerLineCount; lineIdx++) {
@@ -1327,12 +1353,10 @@ export class Markdown implements Component {
 		lines.push(separatorLine);
 
 		// Render rows with wrapping
-		for (let rowIndex = 0; rowIndex < token.rows.length; rowIndex++) {
-			const row = token.rows[rowIndex];
-			const rowCellLines: string[][] = row.map((cell, i) => {
-				const text = this.renderInlineTokens(cell.tokens || [], styleContext);
-				return this.wrapCellText(text, columnWidths[i], styleContext?.stylePrefix);
-			});
+		for (let rowIndex = 0; rowIndex < rowTexts.length; rowIndex++) {
+			const rowCellLines: string[][] = rowTexts[rowIndex].map((text, i) =>
+				this.wrapCellText(text, columnWidths[i], styleContext?.stylePrefix),
+			);
 			const rowLineCount = Math.max(...rowCellLines.map((c) => c.length));
 
 			for (let lineIdx = 0; lineIdx < rowLineCount; lineIdx++) {
@@ -1343,7 +1367,7 @@ export class Markdown implements Component {
 				lines.push(`│ ${rowParts.join(" │ ")} │`);
 			}
 
-			if (rowIndex < token.rows.length - 1) {
+			if (rowIndex < rowTexts.length - 1) {
 				lines.push(separatorLine);
 			}
 		}

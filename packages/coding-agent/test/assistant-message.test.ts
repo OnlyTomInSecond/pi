@@ -66,6 +66,25 @@ describe("AssistantMessageComponent", () => {
 		initTheme("dark");
 	});
 
+	// A fullscreen transcript repaints its viewport, so it draws a streamed table as it grows; the
+	// regular-mode transcript cannot rewrite rows already in the scrollback and waits for the block.
+	test("draws a streamed table live unless the consumer cannot rewrite already-written rows", () => {
+		initTheme("dark");
+		let regular = false;
+		const message = createAssistantMessage([{ type: "text", text: "| a | b |\n| --- | --- |\n| one | two |" }]);
+		const component = new AssistantMessageComponent(undefined, false, undefined, "Thinking...", 0, [], () => regular);
+		component.updateContent(message, true);
+
+		expect(stripAnsi(component.render(80).join("\n"))).toContain("┌");
+		regular = true;
+		// Switching the TUI mode invalidates the mounted tree.
+		component.invalidate();
+		expect(stripAnsi(component.render(80).join("\n"))).not.toContain("┌");
+
+		component.updateContent(message, false);
+		expect(stripAnsi(component.render(80).join("\n"))).toContain("│ one │ two │");
+	});
+
 	test("adds OSC 133 zone markers to assistant messages without tool calls", () => {
 		initTheme("dark");
 

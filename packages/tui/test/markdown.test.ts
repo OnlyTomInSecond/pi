@@ -150,7 +150,7 @@ describe("Markdown component", () => {
 				"text with **bold** and `code`\n    indented code\n- list item",
 				"> quoted line\nplain continuation\n  indented\n--",
 				"- [x] done\n- [ ] todo\n  - nested\n\n- loose item",
-				// A growing table is the one deliberate difference: it stays undrawn until final (next test).
+				"| a | b |\n| - | - |\n| 1 | 2 |\n\nafter",
 				"see [ref]\n\n[ref]: https://example.com\n\nmore",
 				"<div>block</div>\n\ninline <b>tag</b>\n\nafter",
 				// A comment block is dropped from the tokens, so the frozen prefix must still cover the source.
@@ -224,10 +224,34 @@ describe("Markdown component", () => {
 
 			assert.deepStrictEqual(markdown.render(80), new Markdown(`${grown} and more`, 0, 0, theme).render(80));
 		});
-		it("lays a streamed table out once, after its block is complete", () => {
+		it("draws a streamed table as it grows", () => {
 			const header = "intro\n\n| a | b |\n| --- | --- |\n";
 			let streaming = true;
 			const markdown = new Markdown(header, 0, 0, defaultMarkdownTheme, undefined, { incremental: () => streaming });
+
+			markdown.render(80);
+			// A consumer that repaints its viewport draws the table while its columns still follow the rows.
+			const grown = `${header}| one | two |\n`;
+			markdown.setText(grown);
+			const growing = markdown.render(80);
+			assert.ok(
+				growing.some((line) => line.includes("│ one │ two │")),
+				"a growing table should be drawn",
+			);
+			assert.deepStrictEqual(growing, new Markdown(grown, 0, 0, defaultMarkdownTheme).render(80));
+
+			// The end of the stream draws the same table, now laid out for the final column widths.
+			streaming = false;
+			assert.deepStrictEqual(markdown.render(80), new Markdown(grown, 0, 0, defaultMarkdownTheme).render(80));
+		});
+
+		it("lays a deferred streamed table out once, after its block is complete", () => {
+			const header = "intro\n\n| a | b |\n| --- | --- |\n";
+			let streaming = true;
+			const markdown = new Markdown(header, 0, 0, defaultMarkdownTheme, undefined, {
+				incremental: () => streaming,
+				deferStreamedTable: true,
+			});
 
 			// A streamed table's columns follow the rows received so far, so it stays undrawn until final.
 			markdown.render(80);

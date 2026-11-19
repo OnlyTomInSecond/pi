@@ -40,6 +40,11 @@ export class AssistantMessageComponent extends Container {
 	private isStreaming = false;
 	private messageId?: string;
 	private timestamp?: string;
+	/**
+	 * Whether a streamed table waits for its block to be complete. The regular-mode transcript cannot
+	 * rewrite rows already in the scrollback; read on every render, because the mode can change mid-stream.
+	 */
+	private deferStreamedTable?: () => boolean;
 	private thinkingVisibilityOverrides = new Map<number, boolean>();
 	/**
 	 * Latest streaming frame when it has not been rendered yet. Provider deltas arrive far more
@@ -57,6 +62,7 @@ export class AssistantMessageComponent extends Container {
 		hiddenThinkingLabel = "Thinking...",
 		outputPad = 1,
 		markdownTransformers: readonly MarkdownTransformer[] = [],
+		deferStreamedTable?: () => boolean,
 		messageId?: string,
 		timestamp?: string,
 	) {
@@ -69,6 +75,7 @@ export class AssistantMessageComponent extends Container {
 		this.markdownTransformers = markdownTransformers;
 		this.messageId = messageId;
 		this.timestamp = timestamp;
+		this.deferStreamedTable = deferStreamedTable;
 
 		// Container for text/thinking content
 		this.contentContainer = new Container();
@@ -196,6 +203,7 @@ export class AssistantMessageComponent extends Container {
 								),
 								// Only a streamed answer appends to its source.
 								incremental: () => this.isStreaming,
+								deferStreamedTable: this.deferStreamedTable,
 							}),
 					),
 				);
@@ -248,6 +256,7 @@ export class AssistantMessageComponent extends Container {
 											this.timestamp,
 										),
 										incremental: () => this.isStreaming,
+										deferStreamedTable: this.deferStreamedTable,
 									},
 								),
 						);

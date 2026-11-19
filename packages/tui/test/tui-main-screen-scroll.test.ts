@@ -120,13 +120,15 @@ describe("TuiMainScreen scroll preservation", () => {
 	});
 
 	// A streamed table's column widths follow the rows received so far. Rows that already scrolled into
-	// the scrollback cannot be rewritten, so the table stays undrawn until final and is laid out once.
-	it("writes a streamed table once, aligned, after the stream ends", async () => {
+	// the scrollback cannot be rewritten, so a component told to defer its table keeps it undrawn until
+	// final and is laid out once.
+	it("writes a deferred streamed table once, aligned, after the stream ends", async () => {
 		const terminal = new VirtualTerminal(60, 12);
 		const tui = new TuiMainScreen(terminal);
 		let streaming = true;
 		const markdown = new Markdown("intro\n\n| a | b |\n| --- | --- |\n", 0, 0, defaultMarkdownTheme, undefined, {
 			incremental: () => streaming,
+			deferStreamedTable: true,
 		});
 		tui.addChild(markdown);
 		tui.renderNow();

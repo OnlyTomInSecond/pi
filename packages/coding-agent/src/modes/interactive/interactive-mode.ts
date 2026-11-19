@@ -3704,6 +3704,7 @@ export class InteractiveMode {
 						this.hiddenThinkingLabel,
 						this.outputPad,
 						this.getMarkdownTransformers(),
+						() => this.renderer.mode === "regular",
 					);
 					this.streamingMessage = event.message;
 					this.chatContainer.addChild(this.streamingComponent);
@@ -4202,6 +4203,7 @@ export class InteractiveMode {
 					this.hiddenThinkingLabel,
 					this.outputPad,
 					this.getMarkdownTransformers(),
+					() => this.renderer.mode === "regular",
 					options?.messageId,
 					options?.timestamp,
 				);
