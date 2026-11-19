@@ -230,6 +230,22 @@ describe("viewport layout", () => {
 		assert.strictEqual(scrollView.isFollowingEnd, true);
 	});
 
+	it("requests a render when layout ends follow mode", () => {
+		const content = new Text("1\n2\n3\n4\n5\n6", 0, 0);
+		const scrollView = new ScrollView(content, { follow: "end", primary: true });
+		renderLayoutFrame(scrollView, 10, 3, () => {});
+		scrollView.scrollToStart();
+		assert.strictEqual(scrollView.isFollowingEnd, false);
+
+		let renders = 0;
+		content.setText("1\n2");
+		renderLayoutFrame(scrollView, 10, 4, () => {
+			renders += 1;
+		});
+		assert.strictEqual(scrollView.isFollowingEnd, true);
+		assert.strictEqual(renders, 1);
+	});
+
 	it("renders a proportional glyph scrollbar with an expanded active thumb", async () => {
 		const sourceLines = ["abcd界", "abcde2", "abcde3", "abcde4", "abcde5", "abcde6", "abcde7", "abcde8"];
 		const contentBackground = "\x1b[42m";

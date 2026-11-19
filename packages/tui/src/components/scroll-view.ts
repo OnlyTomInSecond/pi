@@ -187,6 +187,7 @@ export class ScrollView extends Container {
 	}
 
 	updateLayout(contentHeight: number, viewportHeight: number, requestRender: () => void): void {
+		const wasFollowingEnd = this.followingEnd;
 		this.contentHeight = Math.max(0, Math.floor(contentHeight));
 		this.currentViewportHeight = Math.max(0, Math.floor(viewportHeight));
 		this.requestRenderCallback = requestRender;
@@ -198,6 +199,9 @@ export class ScrollView extends Container {
 			this.followingEnd = true;
 		}
 		if (this.contentHeight <= this.currentViewportHeight) this.hideTransientScrollbar();
+		// Content that shrank or a viewport that grew can end follow mode during layout, after components
+		// that read the scroll state (such as a sibling hint row) were measured. Render once more to settle.
+		if (this.followingEnd !== wasFollowingEnd) requestRender();
 	}
 
 	override addChild(_component: Component): void {

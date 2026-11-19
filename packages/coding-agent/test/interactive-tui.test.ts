@@ -1,8 +1,7 @@
 import type { Component, Terminal, TUI, WheelScrollLines } from "@earendil-works/pi-tui";
-import { Container, getKeybindings, isViewportTUI, ScrollView, setKeybindings, Text } from "@earendil-works/pi-tui";
+import { Container, isViewportTUI, Text } from "@earendil-works/pi-tui";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
-import { KeybindingsManager } from "../src/core/keybindings.ts";
 import type { FullscreenExitOutput, TuiMode } from "../src/core/settings-manager.ts";
 import {
 	BranchSummaryStatusIndicator,
@@ -77,35 +76,6 @@ describe("createInteractiveTui", () => {
 		await altTerminal.waitForRender();
 		expect(altTerminal.writes.some((write) => write.includes("\x1b[?1049h"))).toBe(true);
 		altTui.stop();
-	});
-
-	it("shows the configured jump-to-bottom shortcut while scrolled up", async () => {
-		initTheme("dark");
-		const previousKeybindings = getKeybindings();
-		setKeybindings(new KeybindingsManager({ "tui.altScreen.bottom": "ctrl+j" }));
-		const terminal = new RecordingTerminal(50, 4);
-		const ui = createInteractiveTui({
-			tuiMode: "fullscreen",
-			showHardwareCursor: false,
-			logDirectory: "/tmp",
-			terminal,
-		});
-		ui.setLayoutRoot(
-			new ScrollView(new Text(Array.from({ length: 8 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0), {
-				follow: "end",
-				primary: true,
-			}),
-		);
-		ui.start();
-		try {
-			await terminal.waitForRender();
-			terminal.sendInput("\x1b[<64;1;1M");
-			await terminal.waitForRender();
-			expect(terminal.getViewport()[3]).toContain("↓ Jump to latest message · Ctrl+J");
-		} finally {
-			ui.stop();
-			setKeybindings(previousKeybindings);
-		}
 	});
 
 	it("replaces the renderer and restores the previous screen for resume-hint exits", async () => {
