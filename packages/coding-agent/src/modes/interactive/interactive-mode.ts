@@ -168,6 +168,7 @@ import { createMermaidMarkdownTransformer } from "./components/mermaid.ts";
 import { ModelSelectorComponent } from "./components/model-selector.ts";
 import {
 	type AuthSelectorProvider,
+	type AuthSelectorStatus,
 	formatAuthSelectorProviderStatus,
 	formatAuthSelectorProviderType,
 	OAuthSelectorComponent,
@@ -196,7 +197,7 @@ import { UserMessageSelectorComponent } from "./components/user-message-selector
 import { editInExternalEditor } from "./external-editor.ts";
 import { refreshModelCatalogs } from "./model-catalog-refresh.ts";
 import { getModelSearchText } from "./model-search.ts";
-import { type BlockedStatus, ProgramStatusReporter } from "./program-status-reporter.ts";
+import { type BlockedStatus, dialogBlockedStatus, ProgramStatusReporter } from "./program-status-reporter.ts";
 import { shareSession } from "./session-share.ts";
 import {
 	getAvailableThemes,
@@ -2985,7 +2986,6 @@ export class InteractiveMode {
 		title: string,
 		options: string[],
 		opts?: ExtensionUIDialogOptions,
-		blocked: BlockedStatus = { kind: "question", message: title },
 	): Promise<string | undefined> {
 		return new Promise((resolve) => {
 			if (opts?.signal?.aborted) {
@@ -3009,7 +3009,7 @@ export class InteractiveMode {
 				() => finish(undefined),
 				{ tui: this.ui, timeout: opts?.timeout, onToggleToolsExpanded: () => this.toggleToolOutputExpansion() },
 			);
-			this.pushExtensionDialog(selector, blocked);
+			this.pushExtensionDialog(selector, dialogBlockedStatus(opts?.blockedKind ?? "question", title));
 		});
 	}
 
@@ -3021,9 +3021,9 @@ export class InteractiveMode {
 		message: string,
 		opts?: ExtensionUIDialogOptions,
 	): Promise<boolean> {
-		const result = await this.showExtensionSelector(`${title}\n${message}`, ["Yes", "No"], opts, {
-			kind: "permission",
-			message: title,
+		const result = await this.showExtensionSelector(`${title}\n${message}`, ["Yes", "No"], {
+			...opts,
+			blockedKind: opts?.blockedKind ?? "permission",
 		});
 		return result === "Yes";
 	}
@@ -3069,7 +3069,7 @@ export class InteractiveMode {
 				() => finish(undefined),
 				{ tui: this.ui, timeout: opts?.timeout },
 			);
-			this.pushExtensionDialog(input, { kind: "question", message: title });
+			this.pushExtensionDialog(input, dialogBlockedStatus(opts?.blockedKind ?? "question", title));
 		});
 	}
 
@@ -3092,7 +3092,7 @@ export class InteractiveMode {
 				undefined,
 				this.settingsManager.getExternalEditorCommand(),
 			);
-			this.pushExtensionDialog(editor, { kind: "question", message: title });
+			this.pushExtensionDialog(editor, dialogBlockedStatus("question", title));
 		});
 	}
 
@@ -4156,7 +4156,9 @@ export class InteractiveMode {
 					message.cancelled,
 					message.truncated ? ({ truncated: true } as TruncationResult) : undefined,
 					message.fullOutputPath,
+					message.fullOutputError,
 				);
+				component.setExpanded(this.toolOutputExpanded);
 				this.chatContainer.addChild(component);
 				break;
 			}
@@ -4612,6 +4614,7 @@ export class InteractiveMode {
 			await this.ui.terminal.drainInput(1000);
 			this.stop();
 			await flushStdout();
+			killTrackedDetachedChildren();
 			process.exit(0);
 		}
 
@@ -4633,6 +4636,9 @@ export class InteractiveMode {
 		}
 
 		await flushStdout();
+		// dispose() only starts killing a running `!` command, which on Windows loses the race with
+		// exit. After the last await, so it also catches a shell spawned after the abort.
+		killTrackedDetachedChildren();
 		process.exit(0);
 	}
 
@@ -4695,10 +4701,7 @@ export class InteractiveMode {
 	private registerSignalHandlers(): void {
 		this.unregisterSignalHandlers();
 
-		const signals: NodeJS.Signals[] = ["SIGTERM"];
-		if (process.platform !== "win32") {
-			signals.push("SIGHUP");
-		}
+		const signals: NodeJS.Signals[] = ["SIGTERM", "SIGHUP"];
 
 		for (const signal of signals) {
 			const handler = () => {
@@ -6161,12 +6164,13 @@ export class InteractiveMode {
 		const options: AuthSelectorProvider[] = [];
 		for (const provider of this.session.modelRuntime.getProviders()) {
 			const authStatus = this.session.modelRuntime.getProviderAuthStatus(provider.id);
-			const status = authStatus.configured
-				? {
-						type: this.session.modelRuntime.isUsingOAuth(provider.id) ? ("oauth" as const) : ("api_key" as const),
-						source: authStatus.label ?? authStatus.source,
-					}
-				: undefined;
+			let status: AuthSelectorStatus | undefined;
+			if (authStatus.configured) {
+				const type = this.session.modelRuntime.isUsingOAuth(provider.id) ? "oauth" : "api_key";
+				status = { kind: "configured", type, source: authStatus.label ?? authStatus.source };
+			} else if (authStatus.source === "stored") {
+				status = { kind: "unresolved" };
+			}
 			const subscription = provider.auth.oauth?.isSubscription === true;
 			if ((!authType || authType === "oauth") && provider.auth.oauth) {
 				options.push({
@@ -6195,13 +6199,13 @@ export class InteractiveMode {
 
 	private async getLogoutProviderOptions(): Promise<AuthSelectorProvider[]> {
 		return (await this.session.modelRuntime.listCredentials({ signal: AbortSignal.timeout(15_000) }))
-			.map(({ providerId, type }) => {
+			.map(({ providerId, type }): AuthSelectorProvider => {
 				const provider = this.session.modelRuntime.getProvider(providerId);
 				return {
 					id: providerId,
 					name: provider?.name ?? providerId,
 					authType: type,
-					status: { type, source: "stored credential" },
+					status: { kind: "configured", type, source: "stored credential" },
 					subscription: provider?.auth.oauth?.isSubscription === true,
 				};
 			})
@@ -7373,6 +7377,7 @@ export class InteractiveMode {
 				result.cancelled,
 				result.truncated ? ({ truncated: true, content: result.output } as TruncationResult) : undefined,
 				result.fullOutputPath,
+				result.fullOutputError,
 			);
 
 			// Record the result in session
@@ -7415,6 +7420,7 @@ export class InteractiveMode {
 					result.cancelled,
 					result.truncated ? ({ truncated: true, content: result.output } as TruncationResult) : undefined,
 					result.fullOutputPath,
+					result.fullOutputError,
 				);
 			}
 		} catch (error) {

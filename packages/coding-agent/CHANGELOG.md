@@ -2,10 +2,39 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `compat.supportsStrictMode` for `google-generative-ai` and `google-vertex` models in `models.json`, so Gemini 3+ models served under IDs without the version can use strict tools ([#12321](https://github.com/earendil-works/pi/issues/12321))
+- Added a `blockedKind` option to `ctx.ui.select()`, `ctx.ui.confirm()` and `ctx.ui.input()` that sets the kind of blocked program status (OSC 7501) the dialog reports, for example `"permission"` for a select that approves an action. See [Dialogs](docs/extensions.md#program-status-kind)
+- Added `full_output_error` to the bash tool's structured output and `fullOutputError` to its details, `BashResult` and `BashExecutionMessage`, giving the reason when truncated output could not be saved to a temp file. User bash output that was truncated without a saved file now says so in the model context and the TUI ([#10585](https://github.com/earendil-works/pi/issues/10585))
+- Added the `gpt-6-luna-decisions` classifier for GitHub Copilot, callable from codemode `models.classify()` with text and images ([#12395](https://github.com/earendil-works/pi/issues/12395))
+
+### Changed
+
+- Changed the default Mistral model from `devstral-medium-latest` to `mistral-medium-latest`, because Mistral retired Devstral and the model catalog no longer lists it
+- Changed `after_provider_response` to also fire for HTTP error responses (4xx/5xx) and for each retried attempt on OpenAI, Azure OpenAI, Anthropic, and Google models, as it already did for OpenAI Codex, Mistral, Radius, and Amazon Bedrock, so extensions can read the status and `retry-after` of rate-limited requests ([#12376](https://github.com/earendil-works/pi/issues/12376))
+
 ### Fixed
 
+- Fixed selecting the `xhigh` thinking level for Gemini 4 Hydrogen and Neon on the `google` and `google-vertex` providers failing with `Unsupported Google thinking level mapping ... xhigh -> xhigh` ([#12184](https://github.com/earendil-works/pi/issues/12184))
+- Fixed sessions with very many entries after the last compaction (about 120k or more) failing to load with `RangeError: Maximum call stack size exceeded` when building the context ([#12154](https://github.com/earendil-works/pi/issues/12154))
 - Fixed `ctx.ui.pasteToEditor()` and `ctx.ui.setEditorText()` not repainting the editor when called outside terminal input handling, such as after an `await` in a command handler ([#12295](https://github.com/earendil-works/pi/issues/12295))
 - Fixed the bash tool returning `(no output)` when the output ended with a line over 50KB followed by an empty line; it now shows the end of that line ([#12350](https://github.com/earendil-works/pi/issues/12350))
+- Fixed `/tree` navigation adding the branch's prompts to Up-arrow history again on every navigation; prompts already in history now move to the most recent position instead of repeating ([#12279](https://github.com/earendil-works/pi/issues/12279))
+- Fixed closing the console window or terminal tab on Windows skipping `session_shutdown` and leaving commands started by the bash tool running, for example `sleep 300` from `bash -c "sleep 300"`. pi now handles SIGHUP on Windows like on POSIX and waits for `taskkill` to finish before it exits. Quitting with Ctrl+D or `/quit` while a `!` command runs, or ending RPC mode while a `bash` command runs, no longer leaves that command running on Windows either
+- Fixed the `AuthStorage` coalesced-reload test failing intermittently on systems with coarse file timestamps ([#12190](https://github.com/earendil-works/pi/issues/12190))
+- Fixed the `thinkingLevelMap` reference in the models.json schema and docs suggesting pi does not support the `xhigh` and `max` thinking levels; it now says they are opt-in and only offered when mapped, and the model guide explains how to map thinking levels ([#12281](https://github.com/earendil-works/pi/issues/12281))
+- Fixed Mermaid diagrams wider than the terminal falling back to their source without explanation; a note now says how many columns the diagram needs ([#12324](https://github.com/earendil-works/pi/issues/12324))
+- Fixed copies on Wayland silently failing when `wl-copy` guessed a non-text MIME type from the copied text, for example `application/x-ruby` for text starting with `def`, which clipboard managers such as Klipper discard; pi now copies as `text/plain` ([#12446](https://github.com/earendil-works/pi/pull/12446) by [@ttempaa](https://github.com/ttempaa))
+- Fixed pi crashing when the bash tool or a `!` command could not write its full-output temp file, for example when `/tmp` was full, over a per-user quota or not writable; both now keep the truncated output and say why the full output could not be saved. Opening the external editor and `/share` now report such failures instead of crashing ([#10585](https://github.com/earendil-works/pi/issues/10585))
+- Fixed `/login` showing a provider as configured when its stored `auth.json` key is a `!command` that fails, while requests failed with `No API key found`. `/login` now shows `stored key did not resolve`, `getProviderAuthStatus()` returns `{ configured: false, source: "stored" }`, and entering the same `!command` again in `/login` runs it again instead of reusing the cached failure ([#12164](https://github.com/earendil-works/pi/issues/12164))
+- Fixed `/login` showing a provider as configured when its stored `auth.json` key is a `!command` that fails, while requests failed with `No API key found`; the provider now shows as not configured ([#12164](https://github.com/earendil-works/pi/issues/12164))
+- Fixed `pi update` run from WSL through the Windows installation of pi rebuilding that installation with Linux npm; it now stops and says that running the Windows installation from WSL is unsupported ([#12172](https://github.com/earendil-works/pi/issues/12172))
+- Fixed right-click paste inserting the clipboard twice in Tabby on Windows, which pastes on right-click itself ([#12406](https://github.com/earendil-works/pi/issues/12406))
+- Fixed dialogs shown before interactive mode starts, such as the project trust prompt, the missing session folder prompt and first-time setup, reporting no `blocked` program status (OSC 7501). Blocked messages of multi-line dialog titles are now the first line only, for example `Trust project folder?` instead of the folder path and explanation. The project trust prompt and first-time setup report `kind=permission` ([#12439](https://github.com/earendil-works/pi/issues/12439))
+- Fixed GitHub Copilot listing classifier models the account cannot use, such as `microsoft-decision-1` on accounts whose plan does not include it, where every call failed with HTTP 400. After `/login` or the next token refresh, only the decision models in the account's Copilot model catalog are listed ([#12395](https://github.com/earendil-works/pi/issues/12395))
+- Fixed the bash tool on Windows not finding Git for Windows installed outside Program Files and running commands through the WSL launcher `System32\bash.exe` instead. pi now asks the `git.exe` on `PATH` for its installation (`git var GIT_SHELL_PATH`, Git 2.47+) and uses its Git Bash before other `bash.exe` on `PATH` ([#12408](https://github.com/earendil-works/pi/issues/12408))
+- Fixed RPC mode, session loading, and llama.cpp model events rescanning an incomplete line on every chunk, which made large lines, such as messages with images, take time quadratic in their size. llama.cpp model events also accept lone CR line endings and CRLF split across chunks ([#12224](https://github.com/earendil-works/pi/issues/12224))
 
 ## [1.6.0] - 2026-11-20
 
