@@ -4,7 +4,7 @@ import { AltScreenSelection } from "./alt-screen-selection.ts";
 import { AltScreenFlashContainer } from "./components/alt-screen-flash.ts";
 import { ScrollView } from "./components/scroll-view.ts";
 import { getKeybindings } from "./keybindings.ts";
-import { isKeyRelease } from "./keys.ts";
+import { isKeyRelease, isKeyRepeat, matchesKey } from "./keys.ts";
 import {
 	getLayoutBoxesAt,
 	getScrollbarGeometry,
@@ -189,6 +189,9 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	};
 	private readonly wheelScroll: WheelScrollAccelerator;
 	private mouseEnabled: boolean;
+	/** Arrow press held for the current input batch; see handleAlternateScrollKey(). */
+	private pendingAlternateScrollPress?: { data: string; direction: -1 | 1 };
+	private replayingAlternateScrollPress = false;
 	private readonly scrollToEndIndicator?: () => string;
 	private readonly onRightClickPaste?: () => void;
 	private readonly scrollbar: AltScreenScrollbar;
@@ -343,6 +346,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	setMouseEnabled(enabled: boolean): void {
 		if (this.mouseEnabled === enabled) return;
 		this.mouseEnabled = enabled;
+		this.pendingAlternateScrollPress = undefined;
 		this.selection.reset();
 		this.scrollbar.reset();
 		this.clearComponentMouseGesture();
@@ -370,6 +374,7 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 	}
 
 	protected override beforeTerminalStop(_options: TuiStopOptions): void {
+		this.pendingAlternateScrollPress = undefined;
 		this.search.close();
 		this.selection.cancelPress();
 		this.scrollbar.reset();
@@ -530,6 +535,52 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 		this.mousePressMoved = false;
 	}
 
+	/**
+	 * Terminals that ignore DECSET 1007 (kitty) turn the wheel into an Up/Down press and release in the
+	 * alternate screen while the mouse is not captured. Hold an unmodified arrow press for the current
+	 * input batch: its release turns it into a transcript scroll, anything else replays it as a key.
+	 */
+	private handleAlternateScrollKey(data: string): { consume?: boolean } | undefined {
+		if (this.replayingAlternateScrollPress) return undefined;
+		const pending = this.pendingAlternateScrollPress;
+		if (pending) {
+			this.pendingAlternateScrollPress = undefined;
+			if (isKeyRelease(data) && this.alternateScrollDirection(data) === pending.direction) {
+				this.scrollBy(pending.direction);
+				return { consume: true };
+			}
+			this.replayAlternateScrollPress(pending.data);
+		}
+		if (this.mouseEnabled || isKeyRelease(data) || isKeyRepeat(data)) return undefined;
+		const direction = this.alternateScrollDirection(data);
+		if (direction === undefined || this.shouldDeferViewportInputToOverlay() || this.search.isFocused()) {
+			return undefined;
+		}
+		this.pendingAlternateScrollPress = { data, direction };
+		queueMicrotask(() => {
+			const held = this.pendingAlternateScrollPress;
+			if (held?.data !== data) return;
+			this.pendingAlternateScrollPress = undefined;
+			this.replayAlternateScrollPress(held.data);
+		});
+		return { consume: true };
+	}
+
+	private alternateScrollDirection(data: string): -1 | 1 | undefined {
+		if (matchesKey(data, "up")) return -1;
+		if (matchesKey(data, "down")) return 1;
+		return undefined;
+	}
+
+	private replayAlternateScrollPress(data: string): void {
+		this.replayingAlternateScrollPress = true;
+		try {
+			this.dispatchTerminalInput(data);
+		} finally {
+			this.replayingAlternateScrollPress = false;
+		}
+	}
+
 	private handleViewportInput(data: string): { consume?: boolean } | undefined {
 		if (data === FOCUS_OUT) {
 			const hadNonEmptyActiveSelection = this.selection.handleFocusOut();
@@ -542,6 +593,9 @@ export class TuiAltScreen extends TuiBase implements ViewportTUI {
 			return { consume: true };
 		}
 		if (data === FOCUS_IN) return { consume: true };
+
+		const alternateScroll = this.handleAlternateScrollKey(data);
+		if (alternateScroll) return alternateScroll;
 
 		const wheelEvent = this.parseWheelEvent(data);
 		if (wheelEvent) {

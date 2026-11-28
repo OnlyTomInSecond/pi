@@ -135,6 +135,72 @@ describe("TuiAltScreen", () => {
 		assert.ok(writeText().includes("\x1b[?1007h"), "the terminal's alternate scroll is restored");
 	});
 
+	it("scrolls instead of editing the input when the terminal sends the wheel as arrow keys", async () => {
+		const terminal = new RecordingTerminal(20, 6);
+		const tui = new TuiAltScreen(terminal, undefined, undefined, { mouse: false });
+		const transcript = new ScrollView(
+			new Text(Array.from({ length: 20 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0),
+			{ follow: "end", primary: true },
+		);
+		const editorInputs: string[] = [];
+		const editor = {
+			focused: false,
+			render: () => ["editor"],
+			invalidate: () => {},
+			handleInput: (data: string) => editorInputs.push(data),
+		};
+		tui.setLayoutRoot(
+			new VStack([
+				{ component: transcript, basis: 0, grow: 1, minSize: 1 },
+				{ component: editor, basis: 1, shrink: 0 },
+			]),
+		);
+		tui.setFocus(editor);
+		tui.start();
+		await terminal.waitForRender();
+		const bottom = transcript.scrollTop;
+
+		// Kitty ignores DECSET 1007 and sends the wheel as an ArrowUp press and its release.
+		terminal.sendInput("\x1b[A");
+		terminal.sendInput("\x1b[1;1:3A");
+		await terminal.waitForRender();
+		assert.strictEqual(transcript.scrollTop, bottom - 1);
+		assert.deepStrictEqual(editorInputs, []);
+		tui.stop();
+	});
+
+	it("replays an arrow press that is not part of a wheel pair", async () => {
+		const terminal = new RecordingTerminal(20, 6);
+		const tui = new TuiAltScreen(terminal, undefined, undefined, { mouse: false });
+		const transcript = new ScrollView(
+			new Text(Array.from({ length: 20 }, (_, index) => `line ${index + 1}`).join("\n"), 0, 0),
+			{ follow: "end", primary: true },
+		);
+		const editorInputs: string[] = [];
+		const editor = {
+			focused: false,
+			render: () => ["editor"],
+			invalidate: () => {},
+			handleInput: (data: string) => editorInputs.push(data),
+		};
+		tui.setLayoutRoot(
+			new VStack([
+				{ component: transcript, basis: 0, grow: 1, minSize: 1 },
+				{ component: editor, basis: 1, shrink: 0 },
+			]),
+		);
+		tui.setFocus(editor);
+		tui.start();
+		await terminal.waitForRender();
+		const bottom = transcript.scrollTop;
+
+		terminal.sendInput("\x1b[A");
+		await Promise.resolve();
+		assert.deepStrictEqual(editorInputs, ["\x1b[A"]);
+		assert.strictEqual(transcript.scrollTop, bottom);
+		tui.stop();
+	});
+
 	it("scrolls the transcript on a wheel event even over a component that handles wheels", async () => {
 		const terminal = new VirtualTerminal(40, 10);
 		const tui = new TuiAltScreen(terminal);

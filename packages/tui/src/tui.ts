@@ -1470,6 +1470,11 @@ export abstract class TuiBase extends Container implements TUI {
 		}, delay);
 	}
 
+	/** Feed `data` through the input listeners and the focused component as if the terminal sent it now. */
+	protected dispatchTerminalInput(data: string): void {
+		if (!this.stopped) this.handleTerminalInput(data);
+	}
+
 	private handleTerminalInput(data: string): void {
 		if (this.consumeTerminalColorResponse(data)) {
 			return;
