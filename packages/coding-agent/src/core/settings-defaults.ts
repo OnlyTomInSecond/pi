@@ -30,7 +30,6 @@ export const SETTINGS_DEFAULTS = {
 	collapseChangelog: false,
 	enableAnalytics: false,
 	enableSkillCommands: true,
-	appendExtensionPrompts: false,
 	terminal: {
 		showImages: true,
 		imageWidthCells: 60,

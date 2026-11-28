@@ -1816,7 +1816,6 @@ export class AgentSession {
 			contextFiles: loadedContextFiles,
 			customPrompt: loaderSystemPrompt,
 			appendSystemPrompt,
-			appendExtensionPrompts: this.settingsManager.getAppendExtensionPrompts(),
 			selectedTools: validToolNames,
 			hiddenTools: [...this._hiddenDeclarations],
 			toolSnippets,
